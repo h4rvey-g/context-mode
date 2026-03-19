@@ -161,7 +161,7 @@ export default function piExtension(pi: any): void {
       if (toolName !== "bash") return;
 
       const command = String(
-        event?.params?.command ?? event?.input?.command ?? "",
+        event?.params?.command ?? event?.tool_input?.command ?? event?.input?.command ?? "",
       );
       if (!command) return;
 
