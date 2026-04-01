@@ -1991,26 +1991,15 @@ async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
 
-  // Write routing instructions for hookless platforms (e.g. Codex CLI, Antigravity)
+  // Log detected MCP client for diagnostics
   try {
     const { detectPlatform, getAdapter } = await import("./adapters/detect.js");
     const clientInfo = server.server.getClientVersion();
     const signal = detectPlatform(clientInfo ?? undefined);
-    const adapter = await getAdapter(signal.platform);
+    await getAdapter(signal.platform);
     if (clientInfo) {
       console.error(`MCP client: ${clientInfo.name} v${clientInfo.version} → ${signal.platform}`);
     }
-    // Routing file auto-write DISABLED for all platforms (#158, #164).
-    // Writing to project dirs dirties git trees and env var detection at
-    // MCP startup is unreliable. Routing is injected via SessionStart hooks
-    // for hook-capable platforms. Non-hook platforms rely on manual setup
-    // until `context-mode init` command is implemented.
-    // if (!adapter.capabilities.sessionStart) {
-    //   const pluginRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-    //   const projectDir = process.env.CLAUDE_PROJECT_DIR ?? process.env.CODEX_HOME ?? process.cwd();
-    //   const written = adapter.writeRoutingInstructions(projectDir, pluginRoot);
-    //   if (written) console.error(`Wrote routing instructions: ${written}`);
-    // }
   } catch { /* best effort — don't block server startup */ }
 
   console.error(`Context Mode MCP server v${VERSION} running on stdio`);

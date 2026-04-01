@@ -42,7 +42,6 @@ import type {
   PreCompactResponse,
   SessionStartResponse,
   HookRegistration,
-  RoutingInstructionsConfig,
   PlatformId,
 } from "../types.js";
 
@@ -467,20 +466,6 @@ export class OpenCodeAdapter implements HookAdapter {
 
   updatePluginRegistry(_pluginRoot: string, _version: string): void {
     // OpenCode manages plugins through npm/opencode.json — no separate registry
-  }
-
-  // ── Routing Instructions (soft enforcement) ────────────
-
-  getRoutingInstructionsConfig(): RoutingInstructionsConfig {
-    return {
-      fileName: "AGENTS.md",
-      globalPath: resolve(homedir(), ".config", this.platform, "AGENTS.md"),
-      projectRelativePath: "AGENTS.md",
-    };
-  }
-
-  writeRoutingInstructions(_projectDir: string, _pluginRoot: string): string | null {
-    return null;
   }
 
   // ── Internal helpers ───────────────────────────────────

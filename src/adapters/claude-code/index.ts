@@ -43,7 +43,6 @@ import type {
   PreCompactResponse,
   SessionStartResponse,
   HookRegistration,
-  RoutingInstructionsConfig,
 } from "../types.js";
 import {
   HOOK_TYPES,
@@ -660,41 +659,6 @@ export class ClaudeCodeAdapter implements HookAdapter {
       writeFileSync(ipPath, JSON.stringify(ipRaw, null, 2) + "\n", "utf-8");
     } catch {
       /* best effort */
-    }
-  }
-
-  // ── Routing Instructions (soft enforcement) ────────────
-
-  getRoutingInstructionsConfig(): RoutingInstructionsConfig {
-    return {
-      fileName: "CLAUDE.md",
-      globalPath: resolve(homedir(), ".claude", "CLAUDE.md"),
-      projectRelativePath: "CLAUDE.md",
-    };
-  }
-
-  writeRoutingInstructions(projectDir: string, pluginRoot: string): string | null {
-    const config = this.getRoutingInstructionsConfig();
-    const targetPath = resolve(projectDir, config.projectRelativePath);
-    const sourcePath = resolve(pluginRoot, "configs", "claude-code", config.fileName);
-
-    try {
-      const content = readFileSync(sourcePath, "utf-8");
-
-      // Check if file exists and already has context-mode instructions
-      try {
-        const existing = readFileSync(targetPath, "utf-8");
-        if (existing.includes("context-mode")) return null;
-        // Append to existing file
-        writeFileSync(targetPath, existing.trimEnd() + "\n\n" + content, "utf-8");
-        return targetPath;
-      } catch {
-        // File doesn't exist — create it
-        writeFileSync(targetPath, content, "utf-8");
-        return targetPath;
-      }
-    } catch {
-      return null;
     }
   }
 

@@ -282,15 +282,23 @@ Full configs: [`configs/cursor/hooks.json`](configs/cursor/hooks.json) | [`confi
 
    The `mcp` entry registers the 6 sandbox tools. The `plugin` entry enables hooks — OpenCode calls the plugin's TypeScript functions directly before and after each tool execution, blocking dangerous commands and enforcing sandbox routing.
 
-3. Restart OpenCode.
+3. *(Optional)* Copy the routing rules file. OpenCode lacks a SessionStart hook, so the model needs an `AGENTS.md` file for routing awareness:
+
+   ```bash
+   cp node_modules/context-mode/configs/opencode/AGENTS.md AGENTS.md
+   ```
+
+   This tells the model which tools to use and which commands are blocked. Without it, hooks still enforce routing — but the model won't know *why* a command was denied.
+
+4. Restart OpenCode.
 
 **Verify:** In the OpenCode session, type `ctx stats`. Context-mode tools should appear and respond.
 
-**Routing:** Automatic. The plugin intercepts tool calls at runtime via `tool.execute.before` and `tool.execute.after`. No routing file is written to your project. The `experimental.session.compacting` hook builds resume snapshots when the conversation compacts.
+**Routing:** Hooks enforce routing programmatically via `tool.execute.before` and `tool.execute.after`. The optional [`AGENTS.md`](configs/opencode/AGENTS.md) file provides routing instructions for model awareness. The `experimental.session.compacting` hook builds resume snapshots when the conversation compacts.
 
 > **Note:** OpenCode's SessionStart hook is not yet available ([#14808](https://github.com/sst/opencode/issues/14808)), so startup/resume session restore is not supported. Compaction recovery works fully via the plugin.
 
-Full config: [`configs/opencode/opencode.json`](configs/opencode/opencode.json)
+Full configs: [`configs/opencode/opencode.json`](configs/opencode/opencode.json) | [`configs/opencode/AGENTS.md`](configs/opencode/AGENTS.md)
 
 </details>
 
@@ -324,11 +332,17 @@ Full config: [`configs/opencode/opencode.json`](configs/opencode/opencode.json)
 
    The `mcp` entry registers the 6 sandbox tools. The `plugin` entry enables hooks — KiloCode calls the plugin's TypeScript functions directly before and after each tool execution, blocking dangerous commands and enforcing sandbox routing.
 
-3. Restart KiloCode.
+3. *(Optional)* Copy the routing rules file. KiloCode shares the OpenCode plugin architecture and lacks SessionStart, so the model needs an `AGENTS.md` file for routing awareness:
+
+   ```bash
+   cp node_modules/context-mode/configs/opencode/AGENTS.md AGENTS.md
+   ```
+
+4. Restart KiloCode.
 
 **Verify:** In the KiloCode session, type `ctx stats`. Context-mode tools should appear and respond.
 
-**Routing:** Automatic. The plugin intercepts tool calls at runtime via `tool.execute.before` and `tool.execute.after`. No routing file is written to your project. The `experimental.session.compacting` hook builds resume snapshots when the conversation compacts.
+**Routing:** Hooks enforce routing programmatically via `tool.execute.before` and `tool.execute.after`. The optional [`AGENTS.md`](configs/opencode/AGENTS.md) file provides routing instructions for model awareness. The `experimental.session.compacting` hook builds resume snapshots when the conversation compacts.
 
 > **Note:** KiloCode shares the same plugin architecture as OpenCode, using the OpenCodeAdapter with platform-specific configuration paths (`kilo.json` instead of `opencode.json`, `~/.config/kilo/` instead of `~/.config/opencode/`). SessionStart hook availability depends on KiloCode's implementation.
 
