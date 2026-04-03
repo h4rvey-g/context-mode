@@ -51,14 +51,19 @@ safe_cmd_quiet() {
   printf '%s' "$out"
 }
 
-# redact — replace API keys, tokens, and secrets with ***REDACTED***.
+# redact — replace API keys, tokens, secrets, and connection strings with ***REDACTED***.
 redact() {
   sed -E \
     -e 's/(sk-[A-Za-z0-9_-]{4})[A-Za-z0-9_-]+/\1***REDACTED***/g' \
     -e 's/("(key|token|secret|password|apiKey|api_key|auth|credential|authorization)"[[:space:]]*:[[:space:]]*")([^"]{4})[^"]*/\1\3***REDACTED***/g' \
     -e 's/(ghp_[A-Za-z0-9]{4})[A-Za-z0-9]+/\1***REDACTED***/g' \
     -e 's/(ghu_[A-Za-z0-9]{4})[A-Za-z0-9]+/\1***REDACTED***/g' \
-    -e 's/(xox[bpras]-[A-Za-z0-9]{4})[A-Za-z0-9-]+/\1***REDACTED***/g'
+    -e 's/(xox[bpras]-[A-Za-z0-9]{4})[A-Za-z0-9-]+/\1***REDACTED***/g' \
+    -e 's|(postgres(ql)?://[^:]+:)[^@]+(@)|\1***REDACTED***\3|g' \
+    -e 's|(mongodb(\+srv)?://[^:]+:)[^@]+(@)|\1***REDACTED***\3|g' \
+    -e 's|(mysql://[^:]+:)[^@]+(@)|\1***REDACTED***\3|g' \
+    -e 's|(redis://[^:]+:)[^@]+(@)|\1***REDACTED***\3|g' \
+    -e 's|(https?://[^:]+:)[^@]+(@)|\1***REDACTED***\3|g'
 }
 
 section() {
@@ -333,14 +338,35 @@ elif [ -n "${CLAUDE_SESSION_ID:-}${CLAUDE_PROJECT_DIR:-}" ]; then
 fi
 
 printf '\n'
-kv "Detected adapter" "$DETECTED_ADAPTER"
+kv "Active adapter (env)" "$DETECTED_ADAPTER"
+
+# Detect installed adapters from config directories
+HOME_DIR_EARLY="${HOME:-$USERPROFILE}"
+INSTALLED=()
+[ -d "$HOME_DIR_EARLY/.claude" ]                && INSTALLED+=("claude-code")
+[ -d "$HOME_DIR_EARLY/.cursor" ] || [ -f ".cursor/mcp.json" ] && INSTALLED+=("cursor")
+[ -d "$HOME_DIR_EARLY/.codex" ]                 && INSTALLED+=("codex")
+[ -d "$HOME_DIR_EARLY/.gemini" ]                && INSTALLED+=("gemini-cli")
+[ -d "$HOME_DIR_EARLY/.openclaw" ]              && INSTALLED+=("openclaw")
+[ -d "$HOME_DIR_EARLY/.kiro" ]                  && INSTALLED+=("kiro")
+[ -d "$HOME_DIR_EARLY/.config/opencode" ] || [ -f "opencode.json" ] || [ -d ".opencode" ] && INSTALLED+=("opencode")
+[ -d "$HOME_DIR_EARLY/.config/kilo" ]           && INSTALLED+=("kilocode")
+[ -d "$HOME_DIR_EARLY/.config/zed" ]            && INSTALLED+=("zed")
+[ -f ".vscode/mcp.json" ]                       && INSTALLED+=("vscode-copilot")
+
+if [ ${#INSTALLED[@]} -gt 0 ]; then
+  kv "Installed adapters" "${INSTALLED[*]}"
+else
+  kv "Installed adapters" "none detected"
+fi
 
 # ─── 6. Config Files ─────────────────────────────────────────────────────────
 
 section "6. Config Files"
 
 HOME_DIR="${HOME:-$USERPROFILE}"
-CWD="$(pwd)"
+# Use git root for project-level configs, fall back to cwd
+CWD="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 
 # Claude Code
 config_file "Claude settings.json" "$HOME_DIR/.claude/settings.json"
@@ -454,6 +480,24 @@ if [ -f "$CLAUDE_SETTINGS" ]; then
   fi
 fi
 
+# Hook registration completeness — check all required hooks are registered
+if [ -f "$CLAUDE_SETTINGS" ] || [ -f "$HOOKS_JSON" ]; then
+  printf '\n**Hook registration check:**\n'
+  REQUIRED_HOOKS=("PreToolUse" "PostToolUse" "PreCompact" "SessionStart")
+  for rh in "${REQUIRED_HOOKS[@]}"; do
+    FOUND="false"
+    # Check hooks.json
+    if [ -f "$HOOKS_JSON" ] && grep -q "\"$rh\"" "$HOOKS_JSON" 2>/dev/null; then
+      FOUND="true"
+    fi
+    # Check settings.json
+    if [ -f "$CLAUDE_SETTINGS" ] && grep -q "\"$rh\"" "$CLAUDE_SETTINGS" 2>/dev/null; then
+      FOUND="true"
+    fi
+    check "$rh registered" "$FOUND"
+  done
+fi
+
 # Path separator check on Windows
 if [ "$OS_TYPE" = "windows" ]; then
   if [ -f "$CLAUDE_SETTINGS" ]; then
@@ -504,9 +548,9 @@ check "bash subprocess spawn" "$([ "$SHELL_EXEC" = "ok" ] && [ "$SHELL_RC" -eq 0
 
 section "10. Process Check"
 
-# Portable process listing
+# Portable process listing — exclude dashboard, esbuild, wrangler, workerd, grep
 if command -v ps &>/dev/null; then
-  CTX_PROCS="$(ps aux 2>/dev/null | grep '[c]ontext-mode' || true)"
+  CTX_PROCS="$(ps aux 2>/dev/null | grep '[c]ontext-mode' | grep -v -E 'context-mode-dashboard|esbuild|wrangler|workerd|grep' || true)"
   CTX_COUNT="$(printf '%s' "$CTX_PROCS" | grep -c . 2>/dev/null || echo 0)"
 else
   CTX_PROCS=""
@@ -527,34 +571,35 @@ fi
 
 section "11. Session Databases"
 
-SESSION_DIR="$HOME_DIR/.claude/context-mode/sessions"
-if [ -d "$SESSION_DIR" ]; then
-  DB_FILES="$(find "$SESSION_DIR" -name '*.db' -type f 2>/dev/null)"
-  DB_COUNT="$(printf '%s' "$DB_FILES" | grep -c . 2>/dev/null || echo 0)"
-  if [ "$DB_COUNT" -gt 0 ]; then
-    # Total size
-    if command -v du &>/dev/null; then
-      DB_SIZE="$(printf '%s' "$DB_FILES" | xargs du -ch 2>/dev/null | tail -1 | cut -f1)"
-    else
-      DB_SIZE="unknown"
+# Check session dirs for all adapters
+SESSION_DIRS=(
+  "$HOME_DIR/.claude/context-mode/sessions"
+  "$HOME_DIR/.cursor/context-mode/sessions"
+  "$HOME_DIR/.codex/context-mode/sessions"
+  "$HOME_DIR/.gemini/context-mode/sessions"
+  "$HOME_DIR/.openclaw/context-mode/sessions"
+  "$HOME_DIR/.kiro/context-mode/sessions"
+)
+TOTAL_DB_COUNT=0
+for SESSION_DIR in "${SESSION_DIRS[@]}"; do
+  if [ -d "$SESSION_DIR" ]; then
+    DB_FILES="$(find "$SESSION_DIR" -name '*.db' -type f 2>/dev/null)"
+    DB_COUNT="$(printf '%s' "$DB_FILES" | grep -c . 2>/dev/null || echo 0)"
+    if [ "$DB_COUNT" -gt 0 ]; then
+      TOTAL_DB_COUNT=$((TOTAL_DB_COUNT + DB_COUNT))
+      if command -v du &>/dev/null; then
+        DB_SIZE="$(printf '%s' "$DB_FILES" | xargs du -ch 2>/dev/null | tail -1 | cut -f1)"
+      else
+        DB_SIZE="unknown"
+      fi
+      kv "$(abbrev_path "$SESSION_DIR")" "$DB_COUNT files, $DB_SIZE"
     fi
-    kv "Session DBs" "$DB_COUNT files, total $DB_SIZE"
-    printf '\nRecent session DBs:\n\n'
-    printf '%s\n' "$DB_FILES" | sort -r | head -5 | while IFS= read -r dbf; do
-      [ -n "$dbf" ] && printf -- '- `%s`\n' "$(abbrev_path "$dbf")"
-    done
-  else
-    printf -- '- No session databases found\n'
   fi
+done
+if [ "$TOTAL_DB_COUNT" -eq 0 ]; then
+  printf -- '- No session databases found in any adapter directory\n'
 else
-  printf -- '- Session directory not found (`%s`)\n' "$(abbrev_path "$SESSION_DIR")"
-fi
-
-# Also check alternate location
-ALT_SESSION_DIR="$HOME_DIR/.context-mode/sessions"
-if [ -d "$ALT_SESSION_DIR" ]; then
-  ALT_COUNT="$(find "$ALT_SESSION_DIR" -name '*.db' -type f 2>/dev/null | grep -c . || echo 0)"
-  [ "$ALT_COUNT" -gt 0 ] && kv "Alt session dir DBs" "$ALT_COUNT files in $(abbrev_path "$ALT_SESSION_DIR")"
+  kv "Total session DBs" "$TOTAL_DB_COUNT"
 fi
 
 # ─── 12. Environment Variables ───────────────────────────────────────────────
