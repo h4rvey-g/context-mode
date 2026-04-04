@@ -658,6 +658,10 @@ Reports session statistics:
 - Call counts per tool
 - Estimated token usage
 
+### ctx-purge
+
+Permanently deletes all indexed content from the FTS5 knowledge base. Use this to wipe the knowledge base entirely and start fresh. This is the sole reset/wipe mechanism — `ctx_stats` is read-only and has no reset capability.
+
 ### ctx-upgrade
 
 Self-update from GitHub:

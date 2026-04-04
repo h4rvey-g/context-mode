@@ -19,7 +19,7 @@ import { createRoutingBlock } from "./routing-block.mjs";
 import { createToolNamer } from "./core/tool-naming.mjs";
 
 const ROUTING_BLOCK = createRoutingBlock(createToolNamer("claude-code"));
-import { readStdin, getSessionId, getSessionDBPath, getSessionEventsPath, getCleanupFlagPath, getClearStatsFlagPath } from "./session-helpers.mjs";
+import { readStdin, getSessionId, getSessionDBPath, getSessionEventsPath, getCleanupFlagPath } from "./session-helpers.mjs";
 import { writeSessionEventsFile, buildSessionDirective, getSessionEvents, getLatestSessionEvents } from "./session-directive.mjs";
 import { createSessionLoaders } from "./session-loaders.mjs";
 import { join, dirname } from "node:path";
@@ -145,10 +145,7 @@ try {
       }
     } catch { /* best effort — never block session start */ }
   }
-  // "clear" — signal MCP server to reset session stats
-  if (source === "clear") {
-    try { writeFileSync(getClearStatsFlagPath(), String(Date.now())); } catch { /* best effort */ }
-  }
+  // "clear" — no reset needed; ctx_purge is the only wipe mechanism
 } catch (err) {
   // Session continuity is best-effort — never block session start
   try {

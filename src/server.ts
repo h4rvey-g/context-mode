@@ -26,6 +26,7 @@ import {
 import { classifyNonZeroExit } from "./exit-classify.js";
 import { startLifecycleGuard } from "./lifecycle.js";
 import { getWorktreeSuffix } from "./session/db.js";
+import type { HookAdapter } from "./adapters/types.js";
 import { loadDatabase } from "./db-base.js";
 import { AnalyticsEngine, formatReport } from "./session/analytics.js";
 const __pkg_dir = dirname(fileURLToPath(import.meta.url));
@@ -81,7 +82,7 @@ let _store: ContentStore | null = null;
  */
 function maybeIndexSessionEvents(store: ContentStore): void {
   try {
-    const sessionsDir = join(homedir(), ".claude", "context-mode", "sessions");
+    const sessionsDir = getSessionDir();
     if (!existsSync(sessionsDir)) return;
     const files = readdirSync(sessionsDir).filter(f => f.endsWith("-events.md"));
     for (const file of files) {
@@ -94,18 +95,70 @@ function maybeIndexSessionEvents(store: ContentStore): void {
   } catch { /* best-effort — session continuity never blocks tools */ }
 }
 
+// ── Platform-aware paths ──────────────────────────────────────────────────
+// The adapter (stored after MCP handshake) is the canonical source for
+// platform-specific paths. All session DB paths go through it — no
+// hardcoded configDir detection in tool handlers.
+
+let _detectedAdapter: HookAdapter | null = null;
+
 /**
- * Compute a per-project persistent path for the ContentStore.
- * Uses SHA256 of the project dir (normalized for Windows) to avoid collisions.
+ * Get the platform-specific sessions directory from the detected adapter.
+ * Falls back to ~/.claude/context-mode/sessions/ before adapter detection.
+ */
+function getSessionDir(): string {
+  if (_detectedAdapter) return _detectedAdapter.getSessionDir();
+  const dir = join(homedir(), ".claude", "context-mode", "sessions");
+  mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+/**
+ * Project directory detection across supported platforms.
+ *
+ * Priority:
+ *   1. Platform-specific env var (set by host IDE before MCP server spawn)
+ *   2. CONTEXT_MODE_PROJECT_DIR (set by start.mjs for ALL platforms — universal)
+ *   3. process.cwd() (last resort)
+ *
+ * CONTEXT_MODE_PROJECT_DIR guarantees correct projectDir even for platforms
+ * that don't set their own env var (Cursor, OpenClaw, Codex, Kiro, Zed).
+ */
+function getProjectDir(): string {
+  return process.env.CLAUDE_PROJECT_DIR
+    || process.env.GEMINI_PROJECT_DIR
+    || process.env.VSCODE_CWD
+    || process.env.OPENCODE_PROJECT_DIR
+    || process.env.PI_PROJECT_DIR
+    || process.env.CONTEXT_MODE_PROJECT_DIR
+    || process.cwd();
+}
+
+/**
+ * Consistent project dir hashing across all DB paths.
+ * Normalizes Windows backslashes before hashing so the same project
+ * always produces the same hash regardless of path separator.
+ */
+function hashProjectDir(): string {
+  const projectDir = getProjectDir();
+  const normalized = projectDir.replace(/\\/g, "/");
+  return createHash("sha256").update(normalized).digest("hex").slice(0, 16);
+}
+
+/**
+ * Compute a per-project, per-platform persistent path for the ContentStore.
+ * Derives content dir from the adapter's session dir so each platform
+ * has its own isolated FTS5 DB — no cross-platform data sharing.
+ *
+ * Layout: ~/<configDir>/context-mode/content/<hash>.db
+ *   e.g.  ~/.claude/context-mode/content/87c28c41ddb64d38.db
+ *         ~/.cursor/context-mode/content/87c28c41ddb64d38.db
  */
 function getStorePath(): string {
-  const projectDir = process.env.CLAUDE_PROJECT_DIR
-    || process.env.GEMINI_PROJECT_DIR
-    || process.env.OPENCLAW_HOME
-    || process.cwd();
-  const normalized = projectDir.replace(/\\/g, "/");
-  const hash = createHash("sha256").update(normalized).digest("hex").slice(0, 16);
-  const dir = join(homedir(), ".context-mode", "content");
+  const hash = hashProjectDir();
+  // Derive content dir from session dir: .../sessions/ → .../content/
+  const sessDir = getSessionDir();
+  const dir = join(dirname(sessDir), "content");
   mkdirSync(dir, { recursive: true });
   return join(dir, `${hash}.db`);
 }
@@ -119,9 +172,12 @@ function getStore(): ContentStore {
 
     // One-time startup cleanup: remove stale content DBs (>14 days)
     try {
-      const contentDir = join(homedir(), ".context-mode", "content");
+      const contentDir = dirname(getStorePath());
       cleanupStaleContentDBs(contentDir, 14);
       _store.cleanupStaleSources(14);
+      // Also clean legacy shared dir from before platform isolation
+      const legacyDir = join(homedir(), ".context-mode", "content");
+      if (existsSync(legacyDir)) cleanupStaleContentDBs(legacyDir, 0);
     } catch { /* best-effort */ }
 
     // Also clean old PID-based DBs from migration
@@ -145,46 +201,12 @@ const sessionStats = {
   sessionStart: Date.now(),
 };
 
-/**
- * Reset session stats to zero. Called when /clear flag is detected.
- * The SessionStart hook writes a .clear-stats flag file on /clear,
- * and the server checks for it before each tool call.
- */
-function resetSessionStats(): void {
-  sessionStats.calls = {};
-  sessionStats.bytesReturned = {};
-  sessionStats.bytesIndexed = 0;
-  sessionStats.bytesSandboxed = 0;
-  sessionStats.cacheHits = 0;
-  sessionStats.cacheBytesSaved = 0;
-  sessionStats.sessionStart = Date.now();
-
-  // Also reset FTS5 content store — drop and recreate on next getStore() call
-  if (_store) {
-    try { _store.cleanup(); } catch { /* best effort */ }
-    _store = null;
-  }
-}
-
-/** Check for .clear-stats flag and reset stats if found. */
-function checkClearStatsFlag(): void {
-  const sessDir = join(homedir(), ".claude", "context-mode", "sessions");
-  try {
-    const flags = readdirSync(sessDir).filter((f) => f.endsWith(".clear-stats"));
-    for (const f of flags) {
-      unlinkSync(join(sessDir, f));
-    }
-    if (flags.length > 0) resetSessionStats();
-  } catch { /* best effort */ }
-}
-
 type ToolResult = {
   content: Array<{ type: "text"; text: string }>;
   isError?: boolean;
 };
 
 function trackResponse(toolName: string, response: ToolResult): ToolResult {
-  checkClearStatsFlag();
   const bytes = response.content.reduce(
     (sum, c) => sum + Buffer.byteLength(c.text),
     0,
@@ -1627,29 +1649,16 @@ server.registerTool(
       "Returns context consumption statistics for the current session. " +
       "Shows total bytes returned to context, breakdown by tool, call counts, " +
       "estimated token usage, and context savings ratio.",
-    inputSchema: z.object({
-      reset: z.boolean().optional().describe("Reset all stats and FTS5 store to zero. Use after /clear."),
-    }),
+    inputSchema: z.object({}),
   },
-  async ({ reset }) => {
-    // Check for clear flag BEFORE reading stats
-    checkClearStatsFlag();
-
-    if (reset) {
-      resetSessionStats();
-      return trackResponse("ctx_stats", {
-        content: [{ type: "text" as const, text: "Session stats and search index reset." }],
-      });
-    }
-
+  async () => {
     // ONE call, ONE source — AnalyticsEngine.queryAll()
     let text: string;
     try {
-      const projectDir = process.env.CLAUDE_PROJECT_DIR || process.cwd();
-      const dbHash = createHash("sha256").update(projectDir).digest("hex").slice(0, 16);
+      const dbHash = hashProjectDir();
       const worktreeSuffix = getWorktreeSuffix();
       const sessionDbPath = join(
-        homedir(), ".claude", "context-mode", "sessions",
+        getSessionDir(),
         `${dbHash}${worktreeSuffix}.db`
       );
 
@@ -1860,6 +1869,96 @@ server.registerTool(
   },
 );
 
+// ── ctx-purge: explicit knowledge base wipe ─────────────────────────────────
+server.registerTool(
+  "ctx_purge",
+  {
+    title: "Purge Knowledge Base",
+    description:
+      "Permanently deletes ALL session data for this project: " +
+      "FTS5 knowledge base (indexed content), session events DB (analytics, metadata, " +
+      "resume snapshots), and session events markdown. Resets in-memory stats. " +
+      "This is irreversible.",
+    inputSchema: z.object({
+      confirm: z.boolean().describe("Must be true to confirm the destructive operation."),
+    }),
+  },
+  async ({ confirm }) => {
+    if (!confirm) {
+      return trackResponse("ctx_purge", {
+        content: [{
+          type: "text" as const,
+          text: "Purge cancelled. Pass confirm: true to proceed.",
+        }],
+      });
+    }
+
+    const deleted: string[] = [];
+
+    // 1. Wipe the persistent FTS5 content store
+    if (_store) {
+      let storeFound = false;
+      try { _store.cleanup(); storeFound = true; } catch { /* best effort */ }
+      _store = null;
+      if (storeFound) deleted.push("knowledge base (FTS5)");
+    } else {
+      const dbPath = getStorePath();
+      let found = false;
+      for (const suffix of ["", "-wal", "-shm"]) {
+        try { unlinkSync(dbPath + suffix); found = true; } catch { /* file may not exist */ }
+      }
+      if (found) deleted.push("knowledge base (FTS5)");
+    }
+
+    // 2. Wipe legacy shared content DB (~/.context-mode/content/<hash>.db)
+    try {
+      const legacyPath = join(homedir(), ".context-mode", "content", `${hashProjectDir()}.db`);
+      for (const suffix of ["", "-wal", "-shm"]) {
+        try { unlinkSync(legacyPath + suffix); } catch { /* ignore */ }
+      }
+    } catch { /* best effort */ }
+
+    // 3. Wipe session events DB (analytics, metadata, resume snapshots)
+    try {
+      const dbHash = hashProjectDir();
+      const worktreeSuffix = getWorktreeSuffix();
+      const sessDir = getSessionDir();
+      const sessDbPath = join(sessDir, `${dbHash}${worktreeSuffix}.db`);
+      const eventsPath = join(sessDir, `${dbHash}${worktreeSuffix}-events.md`);
+      const cleanupFlag = join(sessDir, `${dbHash}${worktreeSuffix}.cleanup`);
+
+      let sessDbFound = false;
+      for (const suffix of ["", "-wal", "-shm"]) {
+        try { unlinkSync(sessDbPath + suffix); sessDbFound = true; } catch { /* ignore */ }
+      }
+      if (sessDbFound) deleted.push("session events DB");
+
+      let eventsFound = false;
+      try { unlinkSync(eventsPath); eventsFound = true; } catch { /* ignore */ }
+      if (eventsFound) deleted.push("session events markdown");
+
+      try { unlinkSync(cleanupFlag); } catch { /* ignore */ }
+    } catch { /* best effort */ }
+
+    // 3. Reset in-memory session stats
+    sessionStats.calls = {};
+    sessionStats.bytesReturned = {};
+    sessionStats.bytesIndexed = 0;
+    sessionStats.bytesSandboxed = 0;
+    sessionStats.cacheHits = 0;
+    sessionStats.cacheBytesSaved = 0;
+    sessionStats.sessionStart = Date.now();
+    deleted.push("session stats");
+
+    return trackResponse("ctx_purge", {
+      content: [{
+        type: "text" as const,
+        text: `Purged: ${deleted.join(", ")}. All session data for this project has been permanently deleted.`,
+      }],
+    });
+  },
+);
+
 // ─────────────────────────────────────────────────────────
 // Server startup
 // ─────────────────────────────────────────────────────────
@@ -1890,16 +1989,16 @@ async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
 
-  // Log detected MCP client for diagnostics
+  // Detect platform adapter — stored for platform-aware session paths
   try {
     const { detectPlatform, getAdapter } = await import("./adapters/detect.js");
     const clientInfo = server.server.getClientVersion();
     const signal = detectPlatform(clientInfo ?? undefined);
-    await getAdapter(signal.platform);
+    _detectedAdapter = await getAdapter(signal.platform);
     if (clientInfo) {
       console.error(`MCP client: ${clientInfo.name} v${clientInfo.version} → ${signal.platform}`);
     }
-  } catch { /* best effort — don't block server startup */ }
+  } catch { /* best effort — _detectedAdapter stays null, falls back to .claude */ }
 
   console.error(`Context Mode MCP server v${VERSION} running on stdio`);
   console.error(`Detected runtimes:\n${getRuntimeSummary(runtimes)}`);

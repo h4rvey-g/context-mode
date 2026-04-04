@@ -364,6 +364,7 @@ Required information:
 | Check version | `/context-mode:ctx-doctor` |
 | Upgrade plugin | `/context-mode:ctx-upgrade` |
 | View session stats | `/context-mode:ctx-stats` |
+| Purge knowledge base | `/context-mode:ctx-purge` |
 | Run diagnostics | `bash scripts/ctx-debug.sh` |
 | See background steps | `Ctrl+O` |
 | Kill cached server | `pkill -f "context-mode.*start.mjs"` |

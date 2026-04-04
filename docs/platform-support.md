@@ -519,5 +519,6 @@ All platforms support utility commands via MCP meta-tools:
 | `ctx stats` | Show context savings, call counts, and session statistics |
 | `ctx doctor` | Diagnose installation: runtimes, hooks, FTS5, versions |
 | `ctx upgrade` | Update from GitHub, rebuild, reconfigure hooks |
+| `ctx purge` | Permanently deletes all indexed content from the knowledge base |
 
-**How they work:** The MCP server exposes `stats`, `doctor`, and `upgrade` tools. The `<ctx_commands>` section in routing instructions (CLAUDE.md, GEMINI.md, AGENTS.md, copilot-instructions.md) maps natural language triggers to MCP tool calls. The `doctor` and `upgrade` tools return shell commands that the LLM executes and formats as a checklist.
+**How they work:** The MCP server exposes `stats`, `doctor`, `upgrade`, and `purge` tools. The `<ctx_commands>` section in routing instructions (CLAUDE.md, GEMINI.md, AGENTS.md, copilot-instructions.md) maps natural language triggers to MCP tool calls. The `doctor` and `upgrade` tools return shell commands that the LLM executes and formats as a checklist. The `purge` tool permanently deletes all indexed content from the knowledge base and is the sole reset mechanism.

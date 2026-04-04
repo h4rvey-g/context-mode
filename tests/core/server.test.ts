@@ -13,7 +13,7 @@
 
 import { strict as assert } from "node:assert";
 import { spawnSync, execSync } from "node:child_process";
-import { writeFileSync, mkdtempSync, mkdirSync, rmSync, readFileSync } from "node:fs";
+import { writeFileSync, mkdtempSync, mkdirSync, rmSync, readFileSync, existsSync } from "node:fs";
 import { join, dirname, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -1084,34 +1084,317 @@ describe("ctx_upgrade tool: inline fallback for missing CLI", () => {
   });
 });
 
-// ─── Clear stats on /clear ───────────────────────────────────────────────────
+// ─── ctx_purge is the ONLY reset mechanism ──────────────────────────────────
 
-describe("Session stats reset on /clear", () => {
+describe("ctx_purge is the sole reset/wipe mechanism", () => {
+  const serverSrc = readFileSync(
+    resolve(__dirname, "../../src/server.ts"),
+    "utf-8",
+  );
+  const routingBlockSrc = readFileSync(
+    resolve(__dirname, "../../hooks/routing-block.mjs"),
+    "utf-8",
+  );
+
+  // ── ctx_stats has NO reset capability ──
+  test("ctx_stats does NOT accept a reset parameter", () => {
+    // Extract only the ctx_stats tool registration
+    const statsMatch = serverSrc.match(
+      /server\.registerTool\(\s*"ctx_stats"[\s\S]*?^\);/m,
+    );
+    expect(statsMatch).not.toBeNull();
+    const statsBody = statsMatch![0];
+    expect(statsBody).not.toContain("reset");
+    expect(statsBody).not.toContain("resetSessionStats");
+  });
+
+  // ── No .clear-stats flag mechanism ──
+  test("server has no checkClearStatsFlag mechanism", () => {
+    expect(serverSrc).not.toContain("checkClearStatsFlag");
+    expect(serverSrc).not.toContain(".clear-stats");
+  });
+
+  // ── Routing block: no reset instructions for /clear or /compact ──
+  test("routing block does not instruct any reset after /clear or /compact", () => {
+    expect(routingBlockSrc).not.toContain("reset: true");
+    expect(routingBlockSrc).not.toContain("ctx_stats(reset");
+  });
+
+  test("routing block informs user about ctx_purge availability", () => {
+    expect(routingBlockSrc).toMatch(/ctx.purge/i);
+  });
+
+  // ── ctx_purge is the complete wipe tool ──
+  test("ctx_purge gates on confirm parameter", () => {
+    expect(serverSrc).toContain("Purge cancelled");
+    expect(serverSrc).toMatch(/if \(!confirm\)/);
+  });
+
+  test("ctx_purge wipes KB, session DB, events, and stats", () => {
+    const purgeMatch = serverSrc.match(
+      /server\.registerTool\(\s*"ctx_purge"[\s\S]*?^\);/m,
+    );
+    expect(purgeMatch).not.toBeNull();
+    const purgeBody = purgeMatch![0];
+    // 1. Wipes FTS5 knowledge base
+    expect(purgeBody).toContain("_store.cleanup()");
+    expect(purgeBody).toContain("_store = null");
+    // 2. Wipes session events DB
+    expect(purgeBody).toContain("sessDbPath");
+    expect(purgeBody).toContain("session events DB");
+    // 3. Wipes session events markdown
+    expect(purgeBody).toContain("eventsPath");
+    expect(purgeBody).toContain("-events.md");
+    // 4. Resets in-memory stats
+    expect(purgeBody).toContain("sessionStats.calls = {}");
+    expect(purgeBody).toContain("sessionStats.sessionStart = Date.now()");
+    // Confirms with list of deleted items
+    expect(purgeBody).toContain("Purged:");
+  });
+});
+
+// ─── Platform-aware session DB paths ─────────────────────────────────────────
+
+describe("Platform-aware session paths via adapter", () => {
   const serverSrc = readFileSync(
     resolve(__dirname, "../../src/server.ts"),
     "utf-8",
   );
 
-  test("server.ts has resetSessionStats function", () => {
-    expect(serverSrc).toContain("function resetSessionStats");
+  // ── Adapter is stored at startup ──
+  test("server stores detected adapter at startup", () => {
+    expect(serverSrc).toContain("let _detectedAdapter");
+    // main() must assign the adapter after detection
+    expect(serverSrc).toMatch(/_detectedAdapter\s*=\s*await\s+getAdapter/);
   });
 
-  test("ctx_stats accepts reset parameter", () => {
-    expect(serverSrc).toContain("reset: z.boolean()");
-    expect(serverSrc).toContain("if (reset)");
+  // ── No hardcoded .claude in tool handlers ──
+  test("ctx_purge has no hardcoded .claude path", () => {
+    const purgeMatch = serverSrc.match(
+      /server\.registerTool\(\s*"ctx_purge"[\s\S]*?^\);/m,
+    );
+    expect(purgeMatch).not.toBeNull();
+    expect(purgeMatch![0]).not.toMatch(/["']\.claude["']/);
   });
 
-  test("resetSessionStats also resets FTS5 content store", () => {
-    expect(serverSrc).toContain("_store.cleanup()");
-    expect(serverSrc).toContain("_store = null");
+  test("ctx_stats has no hardcoded .claude path", () => {
+    const statsMatch = serverSrc.match(
+      /server\.registerTool\(\s*"ctx_stats"[\s\S]*?^\);/m,
+    );
+    expect(statsMatch).not.toBeNull();
+    expect(statsMatch![0]).not.toMatch(/["']\.claude["']/);
   });
 
-  test("routing block instructs reset after /clear", () => {
-    const routingBlockSrc = readFileSync(
-      resolve(__dirname, "../../hooks/routing-block.mjs"),
+  // ── Adapter methods used for session paths ──
+  test("session paths derived from adapter.getSessionDir or getSessionDBPath", () => {
+    // Either directly uses adapter methods or a helper that delegates to them
+    expect(serverSrc).toMatch(/getSessionDir\(\)|getSessionDBPath\(/);
+  });
+
+  // ── Comprehensive projectDir detection ──
+  test("getProjectDir checks verified platform env vars", () => {
+    const fn = serverSrc.match(/function getProjectDir[\s\S]*?^}/m);
+    expect(fn).not.toBeNull();
+    const body = fn![0];
+    // Only env vars verified to be set by host IDEs before MCP server spawn
+    expect(body).toContain("CLAUDE_PROJECT_DIR");
+    expect(body).toContain("GEMINI_PROJECT_DIR");
+    expect(body).toContain("VSCODE_CWD");
+    expect(body).toContain("OPENCODE_PROJECT_DIR");
+    expect(body).toContain("PI_PROJECT_DIR");
+    // Universal fallback set by start.mjs for ALL platforms (Cursor, OpenClaw, etc.)
+    expect(body).toContain("CONTEXT_MODE_PROJECT_DIR");
+    expect(body).toContain("process.cwd()");
+    // Must NOT contain semantically wrong env vars
+    expect(body).not.toContain("OPENCLAW_HOME"); // install dir, not project dir
+  });
+
+  // ── Content DB is platform-isolated (not shared) ──
+  test("getStorePath uses platform-specific dir, not shared ~/.context-mode/", () => {
+    const fn = serverSrc.match(/function getStorePath[\s\S]*?^}/m);
+    expect(fn).not.toBeNull();
+    const body = fn![0];
+    // Must NOT use the shared platform-agnostic directory
+    expect(body).not.toContain('".context-mode"');
+    // Must derive content dir from adapter/session dir (platform-specific)
+    expect(body).toContain("getSessionDir()");
+  });
+});
+
+// ─── Hash consistency ────────────────────────────────────────────────────────
+
+describe("Project dir hash consistency", () => {
+  const serverSrc = readFileSync(
+    resolve(__dirname, "../../src/server.ts"),
+    "utf-8",
+  );
+
+  test("shared hashProjectDir helper exists and normalizes backslashes", () => {
+    const fn = serverSrc.match(/function hashProjectDir[\s\S]*?^}/m);
+    expect(fn).not.toBeNull();
+    const body = fn![0];
+    // Must normalize Windows backslashes before hashing
+    expect(body).toMatch(/replace\(.*\\\\.*\/.*\)/);
+    expect(body).toContain("createHash");
+  });
+
+  test("getStorePath uses hashProjectDir, not inline hashing", () => {
+    const fn = serverSrc.match(/function getStorePath[\s\S]*?^}/m);
+    expect(fn).not.toBeNull();
+    expect(fn![0]).toContain("hashProjectDir");
+    // Must NOT have its own inline createHash call
+    expect(fn![0]).not.toContain("createHash");
+  });
+
+  test("ctx_stats uses hashProjectDir, not inline hashing", () => {
+    const statsMatch = serverSrc.match(
+      /server\.registerTool\(\s*"ctx_stats"[\s\S]*?^\);/m,
+    );
+    expect(statsMatch).not.toBeNull();
+    expect(statsMatch![0]).toContain("hashProjectDir");
+    expect(statsMatch![0]).not.toContain("createHash");
+  });
+
+  test("ctx_purge uses hashProjectDir, not inline hashing", () => {
+    const purgeMatch = serverSrc.match(
+      /server\.registerTool\(\s*"ctx_purge"[\s\S]*?^\);/m,
+    );
+    expect(purgeMatch).not.toBeNull();
+    expect(purgeMatch![0]).toContain("hashProjectDir");
+    expect(purgeMatch![0]).not.toContain("createHash");
+  });
+});
+
+// ─── Purge deleted array honesty ─────────────────────────────────────────────
+
+describe("ctx_purge deleted array is honest", () => {
+  const serverSrc = readFileSync(
+    resolve(__dirname, "../../src/server.ts"),
+    "utf-8",
+  );
+
+  test("every deleted.push in ctx_purge is guarded by a success check", () => {
+    const purgeMatch = serverSrc.match(
+      /server\.registerTool\(\s*"ctx_purge"[\s\S]*?^\);/m,
+    );
+    expect(purgeMatch).not.toBeNull();
+    const body = purgeMatch![0];
+
+    // Find all deleted.push calls and check each one
+    const pushes = [...body.matchAll(/deleted\.push\("([^"]+)"\)/g)];
+    expect(pushes.length).toBeGreaterThanOrEqual(4);
+
+    for (const push of pushes) {
+      const label = push[1];
+      if (label === "session stats") continue; // always truthful (in-memory)
+
+      // Get the 120 chars before this push — must contain a conditional guard
+      const idx = push.index!;
+      const context = body.slice(Math.max(0, idx - 120), idx);
+      const isGuarded = /if\s*\(\s*\w*[Ff]ound/.test(context)
+        || /if\s*\(_store\)/.test(context);
+      expect(isGuarded, `"${label}" push must be guarded by a found/success check`).toBe(true);
+    }
+  });
+});
+
+// ─── KB purge behavioral (ContentStore) ─────────────────────────────────────
+
+describe("ContentStore purge behavior", () => {
+  test("cleanup() deletes DB files (including WAL and SHM)", () => {
+    const tmpPath = join(tmpdir(), `ctx-purge-test-${Date.now()}.db`);
+    const store = new ContentStore(tmpPath);
+
+    store.index({ content: "test content for purge verification", source: "purge-test" });
+    expect(store.getStats().chunks).toBeGreaterThan(0);
+
+    store.cleanup();
+
+    // All DB files should be gone
+    expect(existsSync(tmpPath)).toBe(false);
+    expect(existsSync(tmpPath + "-wal")).toBe(false);
+    expect(existsSync(tmpPath + "-shm")).toBe(false);
+  });
+
+  test("index survives when cleanup is NOT called (--continue scenario)", () => {
+    const tmpPath = join(tmpdir(), `ctx-preserve-test-${Date.now()}.db`);
+    const store = new ContentStore(tmpPath);
+
+    store.index({ content: "preserved content across sessions", source: "preserve-test" });
+    store.close();
+
+    // Simulate --continue: reopen same DB
+    const store2 = new ContentStore(tmpPath);
+    const stats = store2.getStats();
+    expect(stats.chunks).toBeGreaterThan(0);
+
+    const results = store2.search("preserved content", 5);
+    expect(results.length).toBeGreaterThan(0);
+
+    store2.cleanup();
+  });
+
+  test("store recovers after purge — new index works", () => {
+    const tmpPath = join(tmpdir(), `ctx-recovery-test-${Date.now()}.db`);
+
+    // Phase 1: index and purge
+    const store1 = new ContentStore(tmpPath);
+    store1.index({ content: "old content to be purged", source: "old" });
+    store1.cleanup();
+    expect(existsSync(tmpPath)).toBe(false);
+
+    // Phase 2: create fresh store at same path, index new content
+    const store2 = new ContentStore(tmpPath);
+    store2.index({ content: "fresh content after purge", source: "new" });
+
+    const results = store2.search("fresh content", 5);
+    expect(results.length).toBeGreaterThan(0);
+
+    // Old content should NOT be found
+    const oldResults = store2.search("old content to be purged", 5);
+    expect(oldResults.length).toBe(0);
+
+    store2.cleanup();
+  });
+
+  test("double cleanup does not crash", () => {
+    const tmpPath = join(tmpdir(), `ctx-double-purge-${Date.now()}.db`);
+    const store = new ContentStore(tmpPath);
+    store.index({ content: "some content", source: "test" });
+
+    // First cleanup
+    store.cleanup();
+    expect(existsSync(tmpPath)).toBe(false);
+
+    // Second cleanup — DB already gone, should not throw
+    expect(() => store.cleanup()).not.toThrow();
+  });
+
+  test("cleanup on never-indexed store does not crash", () => {
+    const tmpPath = join(tmpdir(), `ctx-empty-purge-${Date.now()}.db`);
+    const store = new ContentStore(tmpPath);
+
+    // No indexing done — purge should still work
+    expect(() => store.cleanup()).not.toThrow();
+    expect(existsSync(tmpPath)).toBe(false);
+  });
+
+  test("ctx_purge handler deletes DB file even when _store is null (--continue scenario)", () => {
+    // This tests the server.ts logic: when _store is null, ctx_purge should
+    // still delete the DB file on disk using getStorePath()
+    const serverSrc = readFileSync(
+      resolve(__dirname, "../../src/server.ts"),
       "utf-8",
     );
-    expect(routingBlockSrc).toContain("After /clear");
-    expect(routingBlockSrc).toContain("reset: true");
+    const purgeMatch = serverSrc.match(
+      /server\.registerTool\(\s*"ctx_purge"[\s\S]*?^\);/m,
+    );
+    expect(purgeMatch).not.toBeNull();
+    const purgeBody = purgeMatch![0];
+
+    // Must have an else branch for when _store is null
+    expect(purgeBody).toContain("} else {");
+    expect(purgeBody).toContain("getStorePath()");
+    expect(purgeBody).toContain("unlinkSync");
   });
 });

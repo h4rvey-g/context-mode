@@ -685,6 +685,7 @@ npm install -g context-mode
 | `ctx_stats` | Show context savings, call counts, and session statistics. | — |
 | `ctx_doctor` | Diagnose installation: runtimes, hooks, FTS5, versions. | — |
 | `ctx_upgrade` | Upgrade to latest version from GitHub, rebuild, reconfigure hooks. | — |
+| `ctx_purge` | Permanently deletes all indexed content from the knowledge base. | — |
 
 ## How the Sandbox Works
 
@@ -913,6 +914,7 @@ See [`docs/platform-support.md`](docs/platform-support.md) for the full capabili
 ctx stats       → context savings, call counts, session report
 ctx doctor      → diagnose runtimes, hooks, FTS5, versions
 ctx upgrade     → update from GitHub, rebuild, reconfigure hooks
+ctx purge       → permanently delete all indexed content from the knowledge base
 ```
 
 **From your terminal** — run directly without an AI session:
@@ -925,7 +927,7 @@ bash scripts/ctx-debug.sh    # full diagnostic report for bug reports
 
 The debug script collects OS info, runtime versions, better-sqlite3 status, adapter detection, config files (redacted), hook validation, FTS5/SQLite test, executor test, process check, session databases, and environment variables into a single pasteable markdown report.
 
-Works on **all platforms**. On Claude Code, slash commands (`/ctx-stats`, `/ctx-doctor`, `/ctx-upgrade`) are also available.
+Works on **all platforms**. On Claude Code, slash commands (`/ctx-stats`, `/ctx-doctor`, `/ctx-upgrade`, `/ctx-purge`) are also available.
 
 ## Benchmarks
 

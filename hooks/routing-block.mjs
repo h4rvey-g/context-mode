@@ -71,7 +71,10 @@ export function createRoutingBlock(t) {
     When the user says "ctx upgrade", "ctx-upgrade", "/ctx-upgrade", or asks to update context-mode:
     → Call the upgrade MCP tool, execute the returned shell command, display results as a checklist.
 
-    After /clear: call ${t("ctx_stats")}(reset: true) to reset session stats and search index.
+    When the user says "ctx purge", "ctx-purge", "/ctx-purge", or asks to wipe/reset the knowledge base:
+    → Call the purge MCP tool with confirm: true. Warn the user this is irreversible.
+
+    After /clear or /compact: knowledge base and session stats are preserved. Inform the user: "context-mode knowledge base preserved. Use \`ctx purge\` if you want to start fresh."
   </ctx_commands>
 </context_window_protection>`;
 }
