@@ -104,6 +104,79 @@ export class BunSQLiteAdapter {
 }
 
 // ─────────────────────────────────────────────────────────
+// node:sqlite adapter (#228)
+// ─────────────────────────────────────────────────────────
+
+/**
+ * Wraps node:sqlite's DatabaseSync to provide better-sqlite3-compatible API.
+ * Bridges: .pragma(), .transaction(). Everything else is passthrough.
+ * Eliminates native addon SIGSEGV on Linux (nodejs/node#62515).
+ */
+export class NodeSQLiteAdapter {
+  #raw: any; // DatabaseSync instance
+
+  constructor(rawDb: any) {
+    this.#raw = rawDb;
+  }
+
+  pragma(source: string): any {
+    // "journal_mode = WAL" → PRAGMA journal_mode = WAL
+    // "table_xinfo(session_events)" → PRAGMA table_xinfo(session_events)
+    // "wal_checkpoint(TRUNCATE)" → PRAGMA wal_checkpoint(TRUNCATE)
+    const stmt = this.#raw.prepare(`PRAGMA ${source}`);
+    const rows = stmt.all();
+    if (!rows || rows.length === 0) return undefined;
+    if (rows.length > 1) return rows;
+    const values = Object.values(rows[0] as Record<string, unknown>);
+    return values.length === 1 ? values[0] : rows[0];
+  }
+
+  exec(sql: string): any {
+    // node:sqlite's exec() supports multi-statement natively
+    this.#raw.exec(sql);
+    return this;
+  }
+
+  prepare(sql: string): any {
+    const stmt = this.#raw.prepare(sql);
+    return {
+      run: (...args: unknown[]) => stmt.run(...args),
+      get: (...args: unknown[]) => stmt.get(...args),
+      all: (...args: unknown[]) => stmt.all(...args),
+      iterate: (...args: unknown[]) => {
+        // node:sqlite uses Symbol.iterator on StatementSync, not .iterate()
+        // Check if iterate exists, otherwise use Symbol.iterator
+        if (typeof stmt.iterate === 'function') {
+          return stmt.iterate(...args);
+        }
+        // Fallback: use all() to create an iterator
+        const rows = stmt.all(...args);
+        return rows[Symbol.iterator]();
+      },
+    };
+  }
+
+  transaction(fn: (...args: any[]) => any): any {
+    // node:sqlite has no transaction() method — manual BEGIN/COMMIT/ROLLBACK
+    return (...args: any[]) => {
+      this.#raw.exec("BEGIN");
+      try {
+        const result = fn(...args);
+        this.#raw.exec("COMMIT");
+        return result;
+      } catch (err) {
+        this.#raw.exec("ROLLBACK");
+        throw err;
+      }
+    };
+  }
+
+  close(): void {
+    this.#raw.close();
+  }
+}
+
+// ─────────────────────────────────────────────────────────
 // Lazy loader
 // ─────────────────────────────────────────────────────────
 
@@ -112,7 +185,8 @@ let _Database: typeof DatabaseConstructor | null = null;
 /**
  * Lazy-load the SQLite driver for the current runtime.
  * Bun → bun:sqlite via BunSQLiteAdapter (issue #45).
- * Node → better-sqlite3 (native addon).
+ * Linux Node → node:sqlite via NodeSQLiteAdapter (issue #228).
+ * Other Node → better-sqlite3 (native addon).
  */
 export function loadDatabase(): typeof DatabaseConstructor {
   if (!_Database) {
@@ -129,8 +203,23 @@ export function loadDatabase(): typeof DatabaseConstructor {
         });
         return new BunSQLiteAdapter(raw);
       } as any;
+    } else if (process.platform === "linux") {
+      // Linux — try node:sqlite to avoid native addon SIGSEGV (nodejs/node#62515).
+      // node:sqlite is built into Node >= 22.5, no flag needed since 22.13.
+      try {
+        const { DatabaseSync } = require(["node", "sqlite"].join(":"));
+        _Database = function NodeDatabaseFactory(path: string, opts?: any) {
+          const raw = new DatabaseSync(path, {
+            readOnly: opts?.readonly ?? false,
+          });
+          return new NodeSQLiteAdapter(raw);
+        } as any;
+      } catch {
+        // node:sqlite not available — fall through to better-sqlite3
+        _Database = require("better-sqlite3") as typeof DatabaseConstructor;
+      }
     } else {
-      // Node.js — use better-sqlite3.
+      // Non-Linux Node.js — use better-sqlite3.
       _Database = require("better-sqlite3") as typeof DatabaseConstructor;
     }
   }
