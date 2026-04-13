@@ -122,16 +122,15 @@ code{font-family:var(--mono);font-size:.88em;background:var(--bg-code);color:var
 
 /* ── Availability ── */
 .avail{position:relative;display:inline-flex;align-items:center;gap:5px;cursor:default}
-.avail .dot{position:relative;width:6px;height:6px;border-radius:50%;background:var(--green);display:inline-block;flex-shrink:0}
-.avail .dot::after{content:'';position:absolute;top:0;left:0;width:6px;height:6px;border-radius:50%;background:var(--green);animation:ping 1.5s cubic-bezier(0,0,.2,1) infinite}
+.avail .dot{width:6px;height:6px;border-radius:50%;background:var(--green);display:inline-block;flex-shrink:0}
+.avail .dot::after{content:'';position:absolute;width:6px;height:6px;border-radius:50%;background:var(--green);animation:ping 1.5s cubic-bezier(0,0,.2,1) infinite}
 @keyframes ping{75%,100%{transform:scale(2);opacity:0}}
 .avail-tip{position:absolute;bottom:calc(100% + 8px);left:50%;transform:translateX(-50%);background:var(--text);color:var(--bg);font-size:12px;line-height:1.5;padding:10px 14px;border-radius:6px;white-space:nowrap;opacity:0;pointer-events:none;transition:opacity .15s}
 .avail-tip::after{content:'';position:absolute;top:100%;left:50%;transform:translateX(-50%);border:5px solid transparent;border-top-color:var(--text)}
 .avail:hover .avail-tip{opacity:1}
 
 /* ── Responsive ── */
-@media(max-width:600px){.hero-stats{gap:1.5rem}.bench{display:grid;grid-template-columns:1fr 1fr;gap:0}.bench-item{min-width:0}.cont{grid-template-columns:1fr 1fr}.layer{flex-wrap:wrap}.stat-grid{grid-template-columns:1fr !important}.security-grid{grid-template-columns:1fr !important}.ent-grid{grid-template-columns:1fr !important}.avail-tip{white-space:normal;width:220px}}
-@media(max-width:400px){.cont{grid-template-columns:1fr}}
+@media(max-width:600px){.hero-stats{gap:1.5rem}.bench{flex-direction:column}.cont{grid-template-columns:1fr 1fr}.layer{flex-wrap:wrap}.avail-tip{white-space:normal;width:220px}}
 </style>
 </head>
 <body>
@@ -181,7 +180,7 @@ code{font-family:var(--mono);font-size:.88em;background:var(--bg-code);color:var
 
   <p class="body-text">Eventually the context window fills up and the agent compacts. It summarizes the conversation. Throws away the originals. The agent forgets what it read, what it decided, what it was in the middle of building. You start over. You re-explain your codebase to a model that just lost its memory.</p>
 
-  <div class="stat-grid" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin:2rem 0">
+  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin:2rem 0">
     <div style="padding:18px;border-left:2px solid var(--orange);background:var(--bg-alt);border-radius:0 6px 6px 0">
       <div style="font-family:var(--serif);font-size:2rem;font-style:italic;color:var(--orange);line-height:1">50%</div>
       <div style="font-size:13px;color:var(--text-2);margin-top:6px;line-height:1.5">accuracy drop at 32K tokens. 11 of 12 models tested. Your agent makes worse decisions as context fills up.</div>
@@ -330,7 +329,7 @@ code{font-family:var(--mono);font-size:.88em;background:var(--bg-code);color:var
 
   <p class="body-text">context-mode runs entirely on your local machine. No cloud. No telemetry. No accounts. No tracking. No analytics. Your code, your prompts, your file paths, your session data stays on your disk. Nothing is sent anywhere, ever. The plugin is source-available under the Elastic License 2.0. You can read every line, audit every hook, verify every claim.</p>
 
-  <div class="security-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:1.5rem 0">
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:1.5rem 0">
     <div style="padding:14px 16px;border:1px solid var(--border-light);border-radius:6px;font-size:14px;line-height:1.6">
       <span style="color:var(--green);font-weight:700;margin-right:6px">✓</span> <strong>Dangerous command blocking</strong><br>
       <span style="color:var(--text-3);font-size:13px">curl, wget, inline HTTP, rm -rf blocked at PreToolUse. Redirected to sandbox or denied.</span>
@@ -391,7 +390,7 @@ code{font-family:var(--mono);font-size:.88em;background:var(--bg-code);color:var
       <p style="font-size:12px;color:#6b7a8d;margin:0">The data layer for AI-assisted development. Twilio model: plugin free, API paid.</p>
     </div>
 
-    <div class="ent-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
       <div style="padding:18px;border:1px solid #1e2a3a;border-radius:6px;background:#141c26">
         <div style="font-size:11px;font-weight:600;color:#4b7bec;letter-spacing:.06em;text-transform:uppercase;margin-bottom:6px">For your EM</div>
         <p style="font-size:13.5px;color:#e0e4e8;line-height:1.5;margin:0 0 6px">"Which of my 10 engineers are struggling with AI tools? Who needs TDD coaching? Where are we wasting cycles?"</p>
