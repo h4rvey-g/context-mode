@@ -63,15 +63,36 @@ const STOPWORDS = new Set([
 // Helpers
 // ─────────────────────────────────────────────────────────
 
-function sanitizeQuery(query: string, mode: "AND" | "OR" = "AND"): string {
-  const words = query
-    .replace(/['"(){}[\]*:^~]/g, " ")
-    .split(/\s+/)
-    .filter(
-      (w) =>
-        w.length > 0 &&
-        !["AND", "OR", "NOT", "NEAR"].includes(w.toUpperCase()),
-    );
+/**
+ * Remove case-insensitive duplicate tokens while preserving the first
+ * occurrence's original casing. FTS5's unicode61 tokenizer lowercases on
+ * both sides, so `"Error" OR "error"` produces no extra recall — just
+ * redundant index lookups. Dedup keeps the compiled query minimal.
+ */
+function dedupeTokens(tokens: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const t of tokens) {
+    const key = t.toLowerCase();
+    if (!seen.has(key)) {
+      seen.add(key);
+      out.push(t);
+    }
+  }
+  return out;
+}
+
+export function sanitizeQuery(query: string, mode: "AND" | "OR" = "AND"): string {
+  const words = dedupeTokens(
+    query
+      .replace(/['"(){}[\]*:^~]/g, " ")
+      .split(/\s+/)
+      .filter(
+        (w) =>
+          w.length > 0 &&
+          !["AND", "OR", "NOT", "NEAR"].includes(w.toUpperCase()),
+      ),
+  );
 
   if (words.length === 0) return '""';
 
@@ -84,10 +105,12 @@ function sanitizeQuery(query: string, mode: "AND" | "OR" = "AND"): string {
   return final.map((w) => `"${w}"`).join(mode === "OR" ? " OR " : " ");
 }
 
-function sanitizeTrigramQuery(query: string, mode: "AND" | "OR" = "AND"): string {
+export function sanitizeTrigramQuery(query: string, mode: "AND" | "OR" = "AND"): string {
   const cleaned = query.replace(/["'(){}[\]*:^~]/g, "").trim();
   if (cleaned.length < 3) return "";
-  const words = cleaned.split(/\s+/).filter((w) => w.length >= 3);
+  const words = dedupeTokens(
+    cleaned.split(/\s+/).filter((w) => w.length >= 3),
+  );
   if (words.length === 0) return "";
 
   const meaningful = words.filter((w) => !STOPWORDS.has(w.toLowerCase()));
