@@ -638,14 +638,21 @@ Full configs: [`configs/kiro/mcp.json`](configs/kiro/mcp.json) | [`configs/kiro/
 
 **Install:**
 
-1. Clone the extension:
+1. Install the package into Pi:
 
    ```bash
-   git clone https://github.com/mksglu/context-mode.git ~/.pi/extensions/context-mode
-   cd ~/.pi/extensions/context-mode
-   npm install
-   npm run build
+   pi install npm:context-mode
    ```
+
+   Alternative — add it manually to `~/.pi/agent/settings.json` (or `.pi/settings.json` for project-level):
+
+   ```json
+   {
+     "packages": ["npm:context-mode"]
+   }
+   ```
+
+   context-mode now ships a Pi package manifest, so Pi can load the bundled extension from npm directly — no clone or local build step required.
 
 2. Add to `~/.pi/agent/mcp.json` (or `.pi/mcp.json` for project-level):
 
@@ -653,14 +660,13 @@ Full configs: [`configs/kiro/mcp.json`](configs/kiro/mcp.json) | [`configs/kiro/
    {
      "mcpServers": {
        "context-mode": {
-         "command": "node",
-         "args": ["/home/youruser/.pi/extensions/context-mode/node_modules/context-mode/start.mjs"]
+         "command": "context-mode"
        }
      }
    }
    ```
 
-   > **Note:** JSON does not expand `~`. Replace `/home/youruser` with your actual home directory (run `echo $HOME` to find it).
+   This works after `pi install npm:context-mode` because Pi installs npm packages globally and the `context-mode` CLI is available on `PATH`.
 
 3. Restart Pi.
 
