@@ -127,6 +127,24 @@ function buildStatsText(db: SessionDB, sessionId: string): string {
   }
 }
 
+function resolveCommandContext(argsOrCtx: unknown, ctx: unknown): any {
+  if (ctx !== undefined) return ctx;
+  if (argsOrCtx && typeof argsOrCtx === "object") return argsOrCtx;
+  return undefined;
+}
+
+function handleCommandText(
+  text: string,
+  ctx: any,
+): { text: string } | undefined {
+  if (ctx?.hasUI) {
+    ctx.ui.notify(text, "info");
+    return;
+  }
+
+  return { text };
+}
+
 // ── Extension entry point ────────────────────────────────
 
 /** Pi extension default export. Called once by Pi runtime with the extension API. */
@@ -343,28 +361,21 @@ export default function piExtension(pi: any): void {
 
   pi.registerCommand("ctx-stats", {
     description: "Show context-mode session statistics",
-    handler: async (_args: string, ctx: any) => {
+    handler: async (argsOrCtx: unknown, maybeCtx: unknown) => {
+      const ctx = resolveCommandContext(argsOrCtx, maybeCtx);
       const text =
         !_db || !_sessionId
           ? "context-mode: no active session"
           : buildStatsText(_db, _sessionId);
 
-      if (ctx?.hasUI) {
-        ctx.ui.notify(text, "info");
-        return;
-      }
-
-      pi.sendMessage({
-        customType: "context-mode",
-        content: text,
-        display: true,
-      });
+      return handleCommandText(text, ctx);
     },
   });
 
   pi.registerCommand("ctx-doctor", {
     description: "Run context-mode diagnostics",
-    handler: async (_args: string, ctx: any) => {
+    handler: async (argsOrCtx: unknown, maybeCtx: unknown) => {
+      const ctx = resolveCommandContext(argsOrCtx, maybeCtx);
       const dbPath = getDBPath();
       const dbExists = existsSync(dbPath);
       const lines: string[] = [
@@ -393,16 +404,7 @@ export default function piExtension(pi: any): void {
       }
 
       const text = lines.join("\n");
-      if (ctx?.hasUI) {
-        ctx.ui.notify(text, "info");
-        return;
-      }
-
-      pi.sendMessage({
-        customType: "context-mode",
-        content: text,
-        display: true,
-      });
+      return handleCommandText(text, ctx);
     },
   });
 }
