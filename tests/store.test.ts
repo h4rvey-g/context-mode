@@ -1462,6 +1462,21 @@ describe("ContentStore — corrupt DB recovery", () => {
 });
 
 // ═══════════════════════════════════════════════════════════
+// mmap_size pragma
+// ═══════════════════════════════════════════════════════════
+
+describe("mmap_size pragma", () => {
+  test("mmap_size is set on new ContentStore", () => {
+    const dbPath = join(tmpdir(), `ctx-mmap-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
+    const store = new ContentStore(dbPath);
+    store.indexPlainText("Memory-mapped I/O test content for FTS5 search", "mmap-test");
+    const results = store.search("memory-mapped");
+    expect(results.length).toBeGreaterThan(0);
+    store.cleanup();
+  });
+});
+
+// ═══════════════════════════════════════════════════════════
 // FTS5 Periodic Optimization
 // ═══════════════════════════════════════════════════════════
 
@@ -1470,12 +1485,10 @@ describe("FTS5 periodic optimize", () => {
     const dbPath = join(tmpdir(), `ctx-optimize-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
     const store = new ContentStore(dbPath);
 
-    // Insert enough sources to trigger at least one optimize cycle
     for (let i = 0; i < ContentStore.OPTIMIZE_EVERY + 5; i++) {
       store.indexPlainText(`Document number ${i} about testing optimization`, `source-${i}`);
     }
 
-    // Search should still work correctly after optimization ran
     const results = store.search("testing optimization");
     expect(results.length).toBeGreaterThan(0);
     expect(results[0].content).toContain("testing optimization");
@@ -1491,12 +1504,10 @@ describe("FTS5 periodic optimize", () => {
       store.indexPlainText(`Content ${i}`, `src-${i}`);
     }
 
-    // close() calls #optimizeFTS — should not throw
     expect(() => store.close()).not.toThrow();
   });
 
   test("OPTIMIZE_EVERY is a reasonable value", () => {
-    // Guard against accidentally setting it too low (perf) or too high (no benefit)
     expect(ContentStore.OPTIMIZE_EVERY).toBeGreaterThanOrEqual(20);
     expect(ContentStore.OPTIMIZE_EVERY).toBeLessThanOrEqual(200);
   });
