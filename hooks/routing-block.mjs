@@ -13,7 +13,8 @@ import { createToolNamer } from "./core/tool-naming.mjs";
 
 // ── Factory functions ─────────────────────────────────────
 
-export function createRoutingBlock(t) {
+export function createRoutingBlock(t, options = {}) {
+  const { includeCommands = true } = options;
   return `
 <context_window_protection>
   <priority_instructions>
@@ -24,6 +25,8 @@ export function createRoutingBlock(t) {
     1. GATHER: ${t("ctx_batch_execute")}(commands, queries)
        - Primary tool for research. Runs all commands, auto-indexes, and searches.
        - ONE call replaces many individual steps.
+       - Each command: {label: "descriptive section header", command: "shell command"}
+       - label becomes the FTS5 chunk title — use descriptive labels for better search.
     2. FOLLOW-UP: ${t("ctx_search")}(queries: ["q1", "q2", ...])
        - Use for all follow-up questions. ONE call, many queries.
     3. PROCESSING: ${t("ctx_execute")}(language, code) | ${t("ctx_execute_file")}(path, language, code)
@@ -60,7 +63,7 @@ export function createRoutingBlock(t) {
       - Key findings
     </response_format>
   </output_constraints>
-
+${includeCommands ? `
   <ctx_commands>
     When the user says "ctx stats", "ctx-stats", "/ctx-stats", or asks about context savings:
     → Call the stats MCP tool and display the full output verbatim.
@@ -76,6 +79,7 @@ export function createRoutingBlock(t) {
 
     After /clear or /compact: knowledge base and session stats are preserved. Inform the user: "context-mode knowledge base preserved. Use \`ctx purge\` if you want to start fresh."
   </ctx_commands>
+` : ''}
 </context_window_protection>`;
 }
 

@@ -17,6 +17,7 @@ import {
   readFileSync,
   rmSync,
   existsSync,
+  unlinkSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 
@@ -32,8 +33,17 @@ const HOOK_PATH = join(__dirname, "..", "..", "hooks", "pretooluse.mjs");
 const _wid = process.env.VITEST_WORKER_ID;
 const _guidanceSuffix = _wid ? `${process.pid}-w${_wid}` : String(process.pid);
 const _guidanceDir = resolve(tmpdir(), `context-mode-guidance-${_guidanceSuffix}`);
+
+// MCP readiness sentinel — subprocess hooks check process.ppid (= this test's pid)
+const mcpSentinel = resolve(tmpdir(), `context-mode-mcp-ready-${process.pid}`);
+
 beforeEach(() => {
   try { rmSync(_guidanceDir, { recursive: true, force: true }); } catch {}
+  writeFileSync(mcpSentinel, String(process.pid));
+});
+
+afterEach(() => {
+  try { unlinkSync(mcpSentinel); } catch {}
 });
 
 interface HookResult {
@@ -197,89 +207,33 @@ describe("WebFetch", () => {
   });
 });
 
-describe("Task", () => {
-  test("Task + prompt: hookSpecificOutput with updatedInput containing routing block", () => {
+describe("Task (#241: no longer routed)", () => {
+  test("Task tool returns empty stdout (passthrough, no routing)", () => {
     const result = runHook({
       tool_name: "Task",
       tool_input: { prompt: "Analyze this codebase and summarize the architecture." },
     });
     assert.equal(result.exitCode, 0, `Expected exit 0, got ${result.exitCode}`);
-    assert.ok(result.stdout.length > 0, "Expected non-empty stdout");
-    const parsed = JSON.parse(result.stdout);
-    assert.ok(parsed.hookSpecificOutput, "Expected hookSpecificOutput");
-    assert.equal(parsed.hookSpecificOutput.hookEventName, "PreToolUse");
-    assert.ok(parsed.hookSpecificOutput.updatedInput, "Expected updatedInput");
-    assert.ok(
-      parsed.hookSpecificOutput.updatedInput.prompt.includes("<context_window_protection>"),
-      "Expected <context_window_protection> XML tag in updatedInput.prompt",
-    );
-    assert.ok(
-      parsed.hookSpecificOutput.updatedInput.prompt.includes("</context_window_protection>"),
-      "Expected </context_window_protection> closing tag in updatedInput.prompt",
-    );
-    assert.ok(
-      parsed.hookSpecificOutput.updatedInput.prompt.includes("<tool_selection_hierarchy>"),
-      "Expected <tool_selection_hierarchy> tag in updatedInput.prompt",
-    );
-    assert.ok(
-      parsed.hookSpecificOutput.updatedInput.prompt.includes("<forbidden_actions>"),
-      "Expected <forbidden_actions> tag in updatedInput.prompt",
-    );
-    assert.ok(
-      parsed.hookSpecificOutput.updatedInput.prompt.includes(
-        "Analyze this codebase and summarize the architecture.",
-      ),
-      "Expected original prompt preserved in updatedInput.prompt",
-    );
+    // Task is no longer intercepted — hook produces no hookSpecificOutput
+    assert.equal(result.stdout.trim(), "", "Expected empty stdout for passthrough");
   });
 
-  test("Task + Bash subagent: upgraded to general-purpose for MCP access", () => {
+  test("TaskCreate returns empty stdout (passthrough)", () => {
     const result = runHook({
-      tool_name: "Task",
-      tool_input: {
-        prompt: "Research this GitHub repository.",
-        subagent_type: "Bash",
-        description: "Research repo",
-      },
+      tool_name: "TaskCreate",
+      tool_input: { title: "my task" },
     });
     assert.equal(result.exitCode, 0);
-    const parsed = JSON.parse(result.stdout);
-    const updated = parsed.hookSpecificOutput.updatedInput;
-    assert.equal(
-      updated.subagent_type,
-      "general-purpose",
-      `Expected subagent_type upgraded to general-purpose, got: ${updated.subagent_type}`,
-    );
-    assert.ok(
-      updated.prompt.includes("<context_window_protection>"),
-      "Expected XML routing block in prompt",
-    );
-    assert.ok(
-      updated.prompt.includes("Research this GitHub repository."),
-      "Expected original prompt preserved",
-    );
-    assert.equal(
-      updated.description,
-      "Research repo",
-      "Expected other fields preserved",
-    );
+    assert.equal(result.stdout.trim(), "", "Expected empty stdout for passthrough");
   });
 
-  test("Task + Explore subagent: keeps original subagent_type", () => {
+  test("TaskUpdate returns empty stdout (passthrough)", () => {
     const result = runHook({
-      tool_name: "Task",
-      tool_input: {
-        prompt: "Find all TypeScript files.",
-        subagent_type: "Explore",
-      },
+      tool_name: "TaskUpdate",
+      tool_input: { id: "123", status: "done" },
     });
     assert.equal(result.exitCode, 0);
-    const parsed = JSON.parse(result.stdout);
-    const updated = parsed.hookSpecificOutput.updatedInput;
-    assert.ok(
-      updated.subagent_type === undefined || updated.subagent_type === "Explore",
-      `Expected subagent_type to remain Explore or undefined, got: ${updated.subagent_type}`,
-    );
+    assert.equal(result.stdout.trim(), "", "Expected empty stdout for passthrough");
   });
 });
 
@@ -515,8 +469,8 @@ describe("Plugin Tool Name Format in ROUTING_BLOCK", () => {
   const PLUGIN_PREFIX = "mcp__plugin_context-mode_context-mode__";
   const SHORT_PREFIX = "mcp__context-mode__";
 
-  test("Task routing block uses plugin-format tool names", () => {
-    const result = runHook({ tool_name: "Task", tool_input: { prompt: "Do something." } });
+  test("Agent routing block uses plugin-format tool names", () => {
+    const result = runHook({ tool_name: "Agent", tool_input: { prompt: "Do something." } });
     assert.equal(result.exitCode, 0);
     const parsed = JSON.parse(result.stdout);
     const prompt = parsed.hookSpecificOutput.updatedInput.prompt;

@@ -3,7 +3,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { createRequire } from "node:module";
 import { createHash } from "node:crypto";
-import { existsSync, unlinkSync, readdirSync, readFileSync, writeFileSync, rmSync, mkdirSync } from "node:fs";
+import { existsSync, unlinkSync, readdirSync, readFileSync, writeFileSync, rmSync, mkdirSync, cpSync, statSync } from "node:fs";
+import { execSync } from "node:child_process";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir, tmpdir } from "node:os";
@@ -1833,35 +1834,43 @@ server.registerTool(
       lines.push("- [-] Performance: NORMAL — install Bun for 3-5x speed boost");
     }
 
-    // Server test
-    try {
+    // Server test — cleanup executor to prevent resource leaks (#247)
+    {
       const testExecutor = new PolyglotExecutor({ runtimes });
-      const result = await testExecutor.execute({ language: "javascript", code: 'console.log("ok");', timeout: 5000 });
-      if (result.exitCode === 0 && result.stdout.trim() === "ok") {
-        lines.push("- [x] Server test: PASS");
-      } else {
-        const detail = result.stderr?.trim() ? ` (${result.stderr.trim().slice(0, 200)})` : "";
-        lines.push(`- [ ] Server test: FAIL — exit ${result.exitCode}${detail}`);
+      try {
+        const result = await testExecutor.execute({ language: "javascript", code: 'console.log("ok");', timeout: 5000 });
+        if (result.exitCode === 0 && result.stdout.trim() === "ok") {
+          lines.push("- [x] Server test: PASS");
+        } else {
+          const detail = result.stderr?.trim() ? ` (${result.stderr.trim().slice(0, 200)})` : "";
+          lines.push(`- [ ] Server test: FAIL — exit ${result.exitCode}${detail}`);
+        }
+      } catch (err: unknown) {
+        lines.push(`- [ ] Server test: FAIL — ${err instanceof Error ? err.message : err}`);
+      } finally {
+        testExecutor.cleanupBackgrounded();
       }
-    } catch (err: unknown) {
-      lines.push(`- [ ] Server test: FAIL — ${err instanceof Error ? err.message : err}`);
     }
 
-    // FTS5 / SQLite
-    try {
-      const Database = loadDatabase();
-      const db = new Database(":memory:");
-      db.exec("CREATE VIRTUAL TABLE fts_test USING fts5(content)");
-      db.exec("INSERT INTO fts_test(content) VALUES ('hello world')");
-      const row = db.prepare("SELECT * FROM fts_test WHERE fts_test MATCH 'hello'").get() as { content: string } | undefined;
-      db.close();
-      if (row && row.content === "hello world") {
-        lines.push("- [x] FTS5 / SQLite: PASS — native module works");
-      } else {
-        lines.push("- [ ] FTS5 / SQLite: FAIL — unexpected result");
+    // FTS5 / SQLite — close in finally to prevent GC segfault (#247)
+    {
+      let testDb: ReturnType<typeof loadDatabase> extends (...args: any[]) => infer R ? R : never;
+      try {
+        const Database = loadDatabase();
+        testDb = new Database(":memory:");
+        testDb.exec("CREATE VIRTUAL TABLE fts_test USING fts5(content)");
+        testDb.exec("INSERT INTO fts_test(content) VALUES ('hello world')");
+        const row = testDb.prepare("SELECT * FROM fts_test WHERE fts_test MATCH 'hello'").get() as { content: string } | undefined;
+        if (row && row.content === "hello world") {
+          lines.push("- [x] FTS5 / SQLite: PASS — native module works");
+        } else {
+          lines.push("- [ ] FTS5 / SQLite: FAIL — unexpected result");
+        }
+      } catch (err: unknown) {
+        lines.push(`- [ ] FTS5 / SQLite: FAIL — ${err instanceof Error ? err.message : err}`);
+      } finally {
+        try { testDb!?.close(); } catch { /* best effort */ }
       }
-    } catch (err: unknown) {
-      lines.push(`- [ ] FTS5 / SQLite: FAIL — ${err instanceof Error ? err.message : err}`);
     }
 
     // Hook script
@@ -2074,6 +2083,111 @@ server.registerTool(
   },
 );
 
+// ── ctx-insight: analytics dashboard ──────────────────────────────────────────
+server.registerTool(
+  "ctx_insight",
+  {
+    title: "Open Insight Dashboard",
+    description:
+      "Opens the context-mode Insight dashboard in the browser. " +
+      "Shows personal analytics: session activity, tool usage, error rate, " +
+      "parallel work patterns, project focus, and actionable insights. " +
+      "First run installs dependencies (~30s). Subsequent runs open instantly.",
+    inputSchema: z.object({
+      port: z.number().optional().describe("Port to serve on (default: 4747)"),
+    }),
+  },
+  async ({ port: userPort }) => {
+    const port = userPort || 4747;
+    const insightSource = resolve(__pkg_dir, "insight");
+    // Use adapter-aware path: derive from sessions dir (works across all 12 adapters)
+    const sessDir = getSessionDir();
+    const cacheDir = join(dirname(sessDir), "insight-cache");
+
+    // Verify source exists
+    if (!existsSync(join(insightSource, "server.mjs"))) {
+      return trackResponse("ctx_insight", {
+        content: [{ type: "text" as const, text: "Error: Insight source not found in plugin. Try upgrading context-mode." }],
+      });
+    }
+
+    try {
+      const steps: string[] = [];
+
+      // Ensure cache dir
+      mkdirSync(cacheDir, { recursive: true });
+
+      // Copy source files if needed (check by comparing server.mjs mtime)
+      const srcMtime = statSync(join(insightSource, "server.mjs")).mtimeMs;
+      const cacheMtime = existsSync(join(cacheDir, "server.mjs"))
+        ? statSync(join(cacheDir, "server.mjs")).mtimeMs : 0;
+
+      if (srcMtime > cacheMtime) {
+        steps.push("Copying source files...");
+        cpSync(insightSource, cacheDir, { recursive: true, force: true });
+        steps.push("Source files copied.");
+      }
+
+      // Install deps if needed
+      const hasNodeModules = existsSync(join(cacheDir, "node_modules"));
+      if (!hasNodeModules) {
+        steps.push("Installing dependencies (first run, ~30s)...");
+        execSync("npm install --production=false", {
+          cwd: cacheDir,
+          stdio: "pipe",
+          timeout: 120000,
+        });
+        steps.push("Dependencies installed.");
+      }
+
+      // Build
+      steps.push("Building dashboard...");
+      execSync("npx vite build", {
+        cwd: cacheDir,
+        stdio: "pipe",
+        timeout: 30000,
+      });
+      steps.push("Build complete.");
+
+      // Start server in background
+      const { spawn } = await import("node:child_process");
+      const child = spawn("node", [join(cacheDir, "server.mjs")], {
+        cwd: cacheDir,
+        env: { ...process.env, PORT: String(port) },
+        detached: true,
+        stdio: "ignore",
+      });
+      child.unref();
+
+      // Wait for server to be ready
+      await new Promise(r => setTimeout(r, 1500));
+
+      // Open browser (cross-platform)
+      const url = `http://localhost:${port}`;
+      const platform = process.platform;
+      try {
+        if (platform === "darwin") execSync(`open "${url}"`, { stdio: "pipe" });
+        else if (platform === "win32") execSync(`start "" "${url}"`, { stdio: "pipe" });
+        else execSync(`xdg-open "${url}" 2>/dev/null || sensible-browser "${url}" 2>/dev/null`, { stdio: "pipe" });
+      } catch { /* browser open is best-effort */ }
+
+      steps.push(`Dashboard running at ${url}`);
+
+      return trackResponse("ctx_insight", {
+        content: [{
+          type: "text" as const,
+          text: steps.map(s => `- ${s}`).join("\n") + `\n\nOpen: ${url}\nPID: ${child.pid} · Stop: kill ${child.pid}`,
+        }],
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return trackResponse("ctx_insight", {
+        content: [{ type: "text" as const, text: `Insight setup failed: ${msg}` }],
+      });
+    }
+  },
+);
+
 // ─────────────────────────────────────────────────────────
 // Server startup
 // ─────────────────────────────────────────────────────────
@@ -2085,11 +2199,16 @@ async function main() {
     console.error(`Cleaned up ${cleaned} stale DB file(s) from previous sessions`);
   }
 
+  // MCP readiness sentinel path (#230)
+  const mcpSentinel = join(tmpdir(), `context-mode-mcp-ready-${process.ppid}`);
+
   // Clean up own DB + backgrounded processes + preload script on shutdown
   const shutdown = () => {
     executor.cleanupBackgrounded();
     if (_store) _store.close(); // persist DB for --continue sessions
     try { unlinkSync(CM_FS_PRELOAD); } catch { /* best effort */ }
+    // Remove MCP readiness sentinel (#230)
+    try { unlinkSync(mcpSentinel); } catch { /* best effort */ }
   };
   const gracefulShutdown = async () => {
     shutdown();
@@ -2104,6 +2223,9 @@ async function main() {
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
+
+  // Write MCP readiness sentinel (#230)
+  try { writeFileSync(mcpSentinel, String(process.pid)); } catch { /* best effort */ }
 
   // Detect platform adapter — stored for platform-aware session paths
   try {

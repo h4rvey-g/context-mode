@@ -1,12 +1,23 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { writeFileSync, unlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { resolve } from "node:path";
 import { routePreToolUse, resetGuidanceThrottle } from "../hooks/core/routing.mjs";
 
 const PROJECT_DIR = "/tmp/test-project";
+
+// MCP readiness sentinel — routing.mjs checks process.ppid in-process
+const mcpSentinel = resolve(tmpdir(), `context-mode-mcp-ready-${process.ppid}`);
 
 describe("guidance throttle", () => {
   beforeEach(() => {
     // Reset throttle state between tests so each test starts fresh
     if (typeof resetGuidanceThrottle === "function") resetGuidanceThrottle();
+    writeFileSync(mcpSentinel, String(process.pid));
+  });
+
+  afterEach(() => {
+    try { unlinkSync(mcpSentinel); } catch {}
   });
 
   it("Read: first call returns guidance, subsequent calls return null", () => {

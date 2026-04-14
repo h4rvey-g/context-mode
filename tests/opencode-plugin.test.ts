@@ -8,9 +8,9 @@ import "./setup-home";
  *   - experimental.session.compacting (snapshot generation)
  */
 
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { mkdtempSync, rmSync, existsSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
+import { describe, it, expect, beforeAll, beforeEach, afterAll, afterEach } from "vitest";
+import { mkdtempSync, rmSync, existsSync, mkdirSync, writeFileSync, unlinkSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 
 // ── Test helpers ──────────────────────────────────────────
@@ -30,6 +30,12 @@ async function createTestPlugin(tempDir: string) {
 }
 
 // ── Tests ─────────────────────────────────────────────────
+
+// MCP readiness sentinel — routing.mjs checks process.ppid in-process
+const mcpSentinel = resolve(tmpdir(), `context-mode-mcp-ready-${process.ppid}`);
+
+beforeEach(() => { writeFileSync(mcpSentinel, String(process.pid)); });
+afterEach(() => { try { unlinkSync(mcpSentinel); } catch {} });
 
 describe("ContextModePlugin", () => {
   let tempDir: string;

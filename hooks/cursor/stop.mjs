@@ -9,11 +9,12 @@ import "../ensure-deps.mjs";
  */
 
 import { readStdin, getSessionId, getSessionDBPath, getInputProjectDir, CURSOR_OPTS } from "../session-helpers.mjs";
-import { join, dirname } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { createSessionLoaders } from "../session-loaders.mjs";
 
 const HOOK_DIR = dirname(fileURLToPath(import.meta.url));
-const PKG_SESSION = join(HOOK_DIR, "..", "..", "build", "session");
+const { loadSessionDB } = createSessionLoaders(HOOK_DIR);
 const OPTS = CURSOR_OPTS;
 
 try {
@@ -25,7 +26,7 @@ try {
     process.env.CURSOR_CWD = projectDir;
   }
 
-  const { SessionDB } = await import(pathToFileURL(join(PKG_SESSION, "db.js")).href);
+  const { SessionDB } = await loadSessionDB();
 
   const dbPath = getSessionDBPath(OPTS);
   const db = new SessionDB({ dbPath });

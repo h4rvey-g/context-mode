@@ -104,6 +104,8 @@ if (args[0] === "doctor") {
   upgrade();
 } else if (args[0] === "hook") {
   hookDispatch(args[1], args[2]);
+} else if (args[0] === "insight") {
+  insight(args[1] ? Number(args[1]) : 4747);
 } else {
   // Default: start MCP server
   import("./server.js");
@@ -416,6 +418,68 @@ async function doctor(): Promise<number> {
 }
 
 /* -------------------------------------------------------
+ * Insight — analytics dashboard
+ * ------------------------------------------------------- */
+
+async function insight(port: number) {
+  const { execSync, spawn } = await import("node:child_process");
+  const { statSync, mkdirSync, cpSync } = await import("node:fs");
+
+  const insightSource = resolve(getPluginRoot(), "insight");
+  // Adapter-agnostic cache: use ~/.claude/context-mode/insight-cache as default
+  // (matches server.ts pattern but CLI doesn't have adapter detection)
+  const cacheDir = join(homedir(), ".claude", "context-mode", "insight-cache");
+
+  if (!existsSync(join(insightSource, "server.mjs"))) {
+    console.error("Error: Insight source not found. Try upgrading context-mode.");
+    process.exit(1);
+  }
+
+  mkdirSync(cacheDir, { recursive: true });
+
+  // Copy source if newer
+  const srcMtime = statSync(join(insightSource, "server.mjs")).mtimeMs;
+  const cacheMtime = existsSync(join(cacheDir, "server.mjs"))
+    ? statSync(join(cacheDir, "server.mjs")).mtimeMs : 0;
+  if (srcMtime > cacheMtime) {
+    console.log("Copying Insight source...");
+    cpSync(insightSource, cacheDir, { recursive: true, force: true });
+  }
+
+  // Install deps
+  if (!existsSync(join(cacheDir, "node_modules"))) {
+    console.log("Installing dependencies (first run)...");
+    execSync("npm install --production=false", { cwd: cacheDir, stdio: "inherit", timeout: 120000 });
+  }
+
+  // Build
+  console.log("Building dashboard...");
+  execSync("npx vite build", { cwd: cacheDir, stdio: "pipe", timeout: 30000 });
+
+  // Start server
+  const url = `http://localhost:${port}`;
+  console.log(`\n  context-mode Insight\n  ${url}\n`);
+
+  const child = spawn("node", [join(cacheDir, "server.mjs")], {
+    cwd: cacheDir,
+    env: { ...process.env, PORT: String(port) },
+    stdio: "inherit",
+  });
+
+  // Open browser
+  const platform = process.platform;
+  try {
+    if (platform === "darwin") execSync(`open "${url}"`, { stdio: "pipe" });
+    else if (platform === "win32") execSync(`start "" "${url}"`, { stdio: "pipe" });
+    else execSync(`xdg-open "${url}" 2>/dev/null || sensible-browser "${url}" 2>/dev/null`, { stdio: "pipe" });
+  } catch { /* best effort */ }
+
+  // Keep alive until Ctrl+C
+  process.on("SIGINT", () => { child.kill(); process.exit(0); });
+  process.on("SIGTERM", () => { child.kill(); process.exit(0); });
+}
+
+/* -------------------------------------------------------
  * Upgrade — adapter-aware hook configuration
  * ------------------------------------------------------- */
 
@@ -485,9 +549,13 @@ async function upgrade() {
     // Old version dirs are cleaned lazily by sessionstart.mjs (age-gated >1h)
     // to avoid breaking active sessions that still reference them (#181).
 
+    // Read files list from cloned repo's package.json so new directories
+    // (like insight/) are automatically included without chicken-and-egg issues
+    // where the old CLI doesn't know about new directories.
+    const clonedPkg = JSON.parse(readFileSync(resolve(srcDir, "package.json"), "utf-8"));
     const items = [
-      "build", "src", "hooks", "skills", "scripts", ".claude-plugin",
-      "start.mjs", "server.bundle.mjs", "cli.bundle.mjs", "package.json",
+      ...(clonedPkg.files || []),
+      "src", "package.json",
     ];
     for (const item of items) {
       try {

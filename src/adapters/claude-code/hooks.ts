@@ -42,7 +42,6 @@ export const PRE_TOOL_USE_MATCHERS = [
   "Read",
   "Grep",
   "Agent",
-  "Task",
   "mcp__plugin_context-mode_context-mode__ctx_execute",
   "mcp__plugin_context-mode_context-mode__ctx_execute_file",
   "mcp__plugin_context-mode_context-mode__ctx_batch_execute",
@@ -53,6 +52,40 @@ export const PRE_TOOL_USE_MATCHERS = [
  * Used by the upgrade command when writing a single consolidated entry.
  */
 export const PRE_TOOL_USE_MATCHER_PATTERN = PRE_TOOL_USE_MATCHERS.join("|");
+
+// ─────────────────────────────────────────────────────────
+// PostToolUse matchers (#229)
+// ─────────────────────────────────────────────────────────
+
+/**
+ * Tools that context-mode's PostToolUse hook should fire on.
+ * Only tools that extractEvents() actually handles — all others
+ * produce zero events and cause false "hook error" display.
+ */
+export const POST_TOOL_USE_MATCHERS = [
+  "Bash",
+  "Read",
+  "Write",
+  "Edit",
+  "NotebookEdit",
+  "Glob",
+  "Grep",
+  "TodoWrite",
+  "TaskCreate",
+  "TaskUpdate",
+  "EnterPlanMode",
+  "ExitPlanMode",
+  "Skill",
+  "Agent",
+  "AskUserQuestion",
+  "EnterWorktree",
+  "mcp__",
+] as const;
+
+/**
+ * Combined matcher pattern for PostToolUse in hooks.json / settings.json.
+ */
+export const POST_TOOL_USE_MATCHER_PATTERN = POST_TOOL_USE_MATCHERS.join("|");
 
 // ─────────────────────────────────────────────────────────
 // Hook script file names

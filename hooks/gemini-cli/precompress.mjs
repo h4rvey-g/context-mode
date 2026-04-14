@@ -10,13 +10,14 @@ import "../ensure-deps.mjs";
  */
 
 import { readStdin, getSessionId, getSessionDBPath, GEMINI_OPTS } from "../session-helpers.mjs";
+import { createSessionLoaders } from "../session-loaders.mjs";
 import { appendFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 
 const HOOK_DIR = dirname(fileURLToPath(import.meta.url));
-const PKG_SESSION = join(HOOK_DIR, "..", "..", "build", "session");
+const { loadSessionDB, loadSnapshot } = createSessionLoaders(HOOK_DIR);
 const OPTS = GEMINI_OPTS;
 const DEBUG_LOG = join(homedir(), ".gemini", "context-mode", "precompress-debug.log");
 
@@ -24,8 +25,8 @@ try {
   const raw = await readStdin();
   const input = JSON.parse(raw);
 
-  const { buildResumeSnapshot } = await import(pathToFileURL(join(PKG_SESSION, "snapshot.js")).href);
-  const { SessionDB } = await import(pathToFileURL(join(PKG_SESSION, "db.js")).href);
+  const { buildResumeSnapshot } = await loadSnapshot();
+  const { SessionDB } = await loadSessionDB();
 
   const dbPath = getSessionDBPath(OPTS);
   const db = new SessionDB({ dbPath });

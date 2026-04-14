@@ -7,11 +7,11 @@ import "../setup-home";
  *   - Exit 2: block (stderr → agent error message)
  */
 
-import { describe, test, expect, beforeAll, afterAll } from "vitest";
+import { describe, test, expect, beforeAll, beforeEach, afterAll, afterEach } from "vitest";
 import { spawnSync } from "node:child_process";
-import { join, dirname } from "node:path";
+import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { mkdtempSync, rmSync, existsSync, unlinkSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, unlinkSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { tmpdir, homedir } from "node:os";
 
@@ -59,6 +59,11 @@ describe("Kiro hooks", () => {
     try { rmSync(tempDir, { recursive: true, force: true }); } catch { /* best effort */ }
     try { if (existsSync(dbPath)) unlinkSync(dbPath); } catch { /* best effort */ }
   });
+
+  // MCP readiness sentinel — subprocess hooks check process.ppid (= this test's pid)
+  const mcpSentinel = resolve(tmpdir(), `context-mode-mcp-ready-${process.pid}`);
+  beforeEach(() => { writeFileSync(mcpSentinel, String(process.pid)); });
+  afterEach(() => { try { unlinkSync(mcpSentinel); } catch {} });
 
   describe("pretooluse.mjs", () => {
     test("exits 0 for passthrough tools", () => {

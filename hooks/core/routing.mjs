@@ -15,7 +15,19 @@ import {
   createRoutingBlock, createReadGuidance, createGrepGuidance, createBashGuidance,
 } from "../routing-block.mjs";
 import { createToolNamer } from "./tool-naming.mjs";
+import { isMCPReady } from "./mcp-ready.mjs";
 import { existsSync, mkdirSync, rmSync, openSync, closeSync, constants as fsConstants } from "node:fs";
+
+/**
+ * Guard for actions that redirect to MCP tools (#230).
+ * If MCP server isn't ready, returns null (passthrough) instead of the
+ * redirect action — prevents agent from getting stuck when MCP tools
+ * are unavailable. Applies to deny and modify actions that mention MCP alternatives.
+ */
+function mcpRedirect(result) {
+  if (!isMCPReady()) return null;
+  return result;
+}
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 
@@ -217,12 +229,12 @@ export function routePreToolUse(toolName, toolInput, projectDir, platform) {
       });
 
       if (hasDangerousSegment) {
-        return {
+        return mcpRedirect({
           action: "modify",
           updatedInput: {
             command: `echo "context-mode: curl/wget blocked. Think in Code — use ${t("ctx_execute")}(language, code) to write code that fetches, processes, and prints only the answer. Or use ${t("ctx_fetch_and_index")}(url, source) to fetch and index. Write pure JS with try/catch, no npm deps. Do NOT retry with curl/wget."`,
           },
-        };
+        });
       }
       // All segments safe → allow through
       return null;
@@ -239,24 +251,24 @@ export function routePreToolUse(toolName, toolInput, projectDir, platform) {
       /requests\.(get|post|put)\s*\(/i.test(noHeredoc) ||
       /http\.(get|request)\s*\(/i.test(noHeredoc)
     ) {
-      return {
+      return mcpRedirect({
         action: "modify",
         updatedInput: {
           command: `echo "context-mode: Inline HTTP blocked. Think in Code — use ${t("ctx_execute")}(language, code) to write code that fetches, processes, and console.log() only the result. Write robust pure JS with try/catch, no npm deps. Do NOT retry with Bash."`,
         },
-      };
+      });
     }
 
     // Build tools (gradle, maven) → redirect to execute sandbox (Issue #38).
     // These produce extremely verbose output that should stay in sandbox.
     if (/(^|\s|&&|\||\;)(\.\/gradlew|gradlew|gradle|\.\/mvnw|mvnw|mvn)\s/i.test(stripped)) {
       const safeCmd = command.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-      return {
+      return mcpRedirect({
         action: "modify",
         updatedInput: {
           command: `echo "context-mode: Build tool redirected. Think in Code — use ${t("ctx_execute")}(language: \\"shell\\", code: \\"${safeCmd} 2>&1 | tail -30\\") to run and print only errors/summary. Do NOT retry with Bash."`,
         },
-      };
+      });
     }
 
     // allow all other Bash commands, but inject routing nudge (once per session)
@@ -276,23 +288,26 @@ export function routePreToolUse(toolName, toolInput, projectDir, platform) {
   // ─── WebFetch: deny + redirect to sandbox ───
   if (canonical === "WebFetch") {
     const url = toolInput.url ?? "";
-    return {
+    return mcpRedirect({
       action: "deny",
       reason: `context-mode: WebFetch blocked. Think in Code — use ${t("ctx_fetch_and_index")}(url: "${url}", source: "...") to fetch and index, then ${t("ctx_search")}(queries: [...]) to query. Or use ${t("ctx_execute")}(language, code) to fetch, process, and console.log() only what you need. Write pure JS, no npm deps. Do NOT use curl, wget, or WebFetch.`,
-    };
+    });
   }
 
-  // ─── Agent/Task: inject context-mode routing into subagent prompts ───
-  if (canonical === "Agent" || canonical === "Task") {
+  // ─── Agent: inject context-mode routing into subagent prompts ───
+  // Subagents cannot use ctx commands (stats/doctor/upgrade/purge) — omit that section (#233)
+  if (canonical === "Agent") {
     const subagentType = toolInput.subagent_type ?? "";
     // Detect the correct field name for the prompt/request/objective/question/query
     const fieldName = ["prompt", "request", "objective", "question", "query", "task"].find(f => f in toolInput) ?? "prompt";
     const prompt = toolInput[fieldName] ?? "";
 
+    const subagentBlock = createRoutingBlock(t, { includeCommands: false });
+
     const updatedInput =
       subagentType === "Bash"
-        ? { ...toolInput, [fieldName]: prompt + routingBlock, subagent_type: "general-purpose" }
-        : { ...toolInput, [fieldName]: prompt + routingBlock };
+        ? { ...toolInput, [fieldName]: prompt + subagentBlock, subagent_type: "general-purpose" }
+        : { ...toolInput, [fieldName]: prompt + subagentBlock };
 
     return { action: "modify", updatedInput };
   }

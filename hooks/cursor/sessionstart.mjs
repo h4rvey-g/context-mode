@@ -25,12 +25,12 @@ import {
   getInputProjectDir,
   CURSOR_OPTS,
 } from "../session-helpers.mjs";
-import { join } from "node:path";
 import { unlinkSync } from "node:fs";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
+import { createSessionLoaders } from "../session-loaders.mjs";
 
 const HOOK_DIR = fileURLToPath(new URL(".", import.meta.url));
-const PKG_SESSION = join(HOOK_DIR, "..", "..", "build", "session");
+const { loadSessionDB } = createSessionLoaders(HOOK_DIR);
 const OPTS = CURSOR_OPTS;
 
 let additionalContext = ROUTING_BLOCK;
@@ -46,7 +46,7 @@ try {
   }
 
   if (source === "compact" || source === "resume") {
-    const { SessionDB } = await import(pathToFileURL(join(PKG_SESSION, "db.js")).href);
+    const { SessionDB } = await loadSessionDB();
     const dbPath = getSessionDBPath(OPTS);
     const db = new SessionDB({ dbPath });
 
@@ -70,7 +70,7 @@ try {
 
     db.close();
   } else if (source === "startup") {
-    const { SessionDB } = await import(pathToFileURL(join(PKG_SESSION, "db.js")).href);
+    const { SessionDB } = await loadSessionDB();
     const dbPath = getSessionDBPath(OPTS);
     const db = new SessionDB({ dbPath });
     try { unlinkSync(getSessionEventsPath(OPTS)); } catch { /* no stale file */ }

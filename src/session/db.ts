@@ -343,7 +343,7 @@ export class SessionDB extends SQLiteBase {
       this.stmt(S.updateMetaLastEvent).run(sessionId);
     });
 
-    transaction();
+    this.withRetry(() => transaction());
   }
 
   /**

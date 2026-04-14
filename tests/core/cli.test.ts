@@ -142,10 +142,25 @@ describe(".mcp.json — MCP server config", () => {
     expect(upgradeSrc).toContain('resolve(pluginRoot, ".mcp.json")');
   });
 
-  it("template .mcp.json keeps ${CLAUDE_PLUGIN_ROOT} for marketplace compatibility", () => {
+  it("plugin manifest keeps ${CLAUDE_PLUGIN_ROOT} for marketplace compatibility", () => {
+    // Marketplace installs read .claude-plugin/plugin.json, not repo-root
+    // .mcp.json. The plugin manifest is the one that must retain the
+    // ${CLAUDE_PLUGIN_ROOT} placeholder so installed plugins resolve their
+    // bundled server path. Repo-root .mcp.json is for contributors opening
+    // the repo as a regular project and uses a relative path to avoid the
+    // "Missing environment variable: CLAUDE_PLUGIN_ROOT" warning.
+    const plugin = JSON.parse(
+      readFileSync(resolve(ROOT, ".claude-plugin", "plugin.json"), "utf-8"),
+    );
+    const args = plugin.mcpServers["context-mode"].args;
+    expect(args[0]).toContain("CLAUDE_PLUGIN_ROOT");
+  });
+
+  it("repo-root .mcp.json uses relative path to silence CLAUDE_PLUGIN_ROOT warning", () => {
     const mcp = JSON.parse(readFileSync(resolve(ROOT, ".mcp.json"), "utf-8"));
     const args = mcp.mcpServers["context-mode"].args;
-    expect(args[0]).toContain("CLAUDE_PLUGIN_ROOT");
+    expect(args[0]).not.toContain("CLAUDE_PLUGIN_ROOT");
+    expect(args[0]).toMatch(/^\.\/|^start\.mjs$/);
   });
 });
 
@@ -475,6 +490,160 @@ describe("bun:sqlite adapter (#45)", () => {
     // Verify it provides the full better-sqlite3 interface
     const fake = await createBunLikeFake();
     const db = new BunSQLiteAdapter(fake);
+    expect(typeof db.pragma).toBe("function");
+    expect(typeof db.exec).toBe("function");
+    expect(typeof db.prepare).toBe("function");
+    expect(typeof db.transaction).toBe("function");
+    expect(typeof db.close).toBe("function");
+    db.close();
+  });
+});
+
+// ── node:sqlite adapter (#228) ──────────────────────────────────────────
+
+describe("node:sqlite adapter (#228)", () => {
+  /**
+   * Helper: create an in-memory SQLite db that behaves like node:sqlite's DatabaseSync.
+   * Uses better-sqlite3 as engine but strips/alters methods to match node:sqlite API:
+   * - NO .pragma() method
+   * - NO .transaction() method
+   * - .exec() supports multi-statement natively (better-sqlite3 already does)
+   * - .get() returns undefined (same as better-sqlite3)
+   * - .prepare() returns StatementSync-like objects
+   */
+  async function createNodeSQLiteFake(dbPath?: string) {
+    const { loadDatabase } = await import("../../src/db-base.js");
+    // Reset cached _Database to get fresh better-sqlite3
+    const Database = loadDatabase();
+    const real = new Database(dbPath ?? ":memory:");
+
+    return {
+      prepare: (sql: string) => {
+        const stmt = real.prepare(sql);
+        return {
+          run: (...args: any[]) => stmt.run(...args),
+          get: (...args: any[]) => stmt.get(...args),
+          all: (...args: any[]) => stmt.all(...args),
+          // node:sqlite doesn't have iterate() — has Symbol.iterator
+          [Symbol.iterator]: (...args: any[]) => stmt.iterate(...args),
+        };
+      },
+      exec: (sql: string) => real.exec(sql),
+      // NO .pragma() — node:sqlite doesn't have it
+      // NO .transaction() — node:sqlite doesn't have it
+      close: () => real.close(),
+    };
+  }
+
+  test("pragma: adapter.pragma() returns scalar for assignment", async () => {
+    const { NodeSQLiteAdapter } = await import("../../src/db-base.js");
+    const dbFile = join(mkdtempSync(join(tmpdir(), "node-adapter-")), "test.db");
+    const fake = await createNodeSQLiteFake(dbFile);
+    const db = new NodeSQLiteAdapter(fake);
+    const result = db.pragma("journal_mode = WAL");
+    expect(result).toBe("wal");
+    db.close();
+    rmSync(dbFile, { force: true });
+  });
+
+  test("pragma: adapter.pragma() returns rows for table_xinfo", async () => {
+    const { NodeSQLiteAdapter } = await import("../../src/db-base.js");
+    const fake = await createNodeSQLiteFake();
+    const db = new NodeSQLiteAdapter(fake);
+    fake.exec("CREATE TABLE test_tbl (id INTEGER PRIMARY KEY, name TEXT)");
+    const rows = db.pragma("table_xinfo(test_tbl)");
+    expect(Array.isArray(rows)).toBe(true);
+    expect(rows.length).toBe(2);
+    expect(rows[0].name).toBe("id");
+    expect(rows[1].name).toBe("name");
+    db.close();
+  });
+
+  test("exec: adapter.exec() handles multi-statement SQL", async () => {
+    const { NodeSQLiteAdapter } = await import("../../src/db-base.js");
+    const fake = await createNodeSQLiteFake();
+    const db = new NodeSQLiteAdapter(fake);
+    db.exec(`
+      CREATE TABLE t1 (id INTEGER PRIMARY KEY);
+      CREATE TABLE t2 (id INTEGER PRIMARY KEY);
+      INSERT INTO t1 VALUES (1);
+      INSERT INTO t2 VALUES (2);
+    `);
+    const r1 = db.prepare("SELECT * FROM t1").all();
+    const r2 = db.prepare("SELECT * FROM t2").all();
+    expect(r1).toHaveLength(1);
+    expect(r2).toHaveLength(1);
+    db.close();
+  });
+
+  test("get: adapter.prepare().get() returns undefined for missing row", async () => {
+    const { NodeSQLiteAdapter } = await import("../../src/db-base.js");
+    const fake = await createNodeSQLiteFake();
+    const db = new NodeSQLiteAdapter(fake);
+    db.exec("CREATE TABLE t (id INTEGER PRIMARY KEY)");
+    const result = db.prepare("SELECT * FROM t WHERE id = 999").get();
+    expect(result).toBeUndefined();
+    db.close();
+  });
+
+  test("run: adapter.prepare().run() returns {changes, lastInsertRowid}", async () => {
+    const { NodeSQLiteAdapter } = await import("../../src/db-base.js");
+    const fake = await createNodeSQLiteFake();
+    const db = new NodeSQLiteAdapter(fake);
+    db.exec("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)");
+    const info = db.prepare("INSERT INTO t (name) VALUES (?)").run("test");
+    expect(info.changes).toBe(1);
+    expect(info.lastInsertRowid).toBe(1);
+    db.close();
+  });
+
+  test("transaction: adapter.transaction() commits on success", async () => {
+    const { NodeSQLiteAdapter } = await import("../../src/db-base.js");
+    const fake = await createNodeSQLiteFake();
+    const db = new NodeSQLiteAdapter(fake);
+    db.exec("CREATE TABLE t (id INTEGER PRIMARY KEY, val TEXT)");
+    const insertMany = db.transaction((items: string[]) => {
+      for (const item of items) {
+        db.prepare("INSERT INTO t (val) VALUES (?)").run(item);
+      }
+    });
+    insertMany(["a", "b", "c"]);
+    const rows = db.prepare("SELECT * FROM t").all();
+    expect(rows).toHaveLength(3);
+    db.close();
+  });
+
+  test("transaction: adapter.transaction() rolls back on error", async () => {
+    const { NodeSQLiteAdapter } = await import("../../src/db-base.js");
+    const fake = await createNodeSQLiteFake();
+    const db = new NodeSQLiteAdapter(fake);
+    db.exec("CREATE TABLE t (id INTEGER PRIMARY KEY, val TEXT)");
+    const failingTx = db.transaction(() => {
+      db.prepare("INSERT INTO t (val) VALUES (?)").run("should-rollback");
+      throw new Error("intentional");
+    });
+    expect(() => failingTx()).toThrow("intentional");
+    const rows = db.prepare("SELECT * FROM t").all();
+    expect(rows).toHaveLength(0); // rolled back
+    db.close();
+  });
+
+  test("loadDatabase: source checks platform before choosing node:sqlite (#228)", () => {
+    const src = readFileSync(resolve(ROOT, "src", "db-base.ts"), "utf-8");
+    const loadDbSection = src.slice(src.indexOf("function loadDatabase"), src.indexOf("return _Database"));
+    // Must check Linux platform
+    expect(loadDbSection).toContain('process.platform');
+    expect(loadDbSection).toContain('"linux"');
+    // Must reference NodeSQLiteAdapter
+    expect(loadDbSection).toContain("NodeSQLiteAdapter");
+    // Must still have better-sqlite3 fallback
+    expect(loadDbSection).toContain("better-sqlite3");
+  });
+
+  test("NodeSQLiteAdapter provides full better-sqlite3 interface", async () => {
+    const { NodeSQLiteAdapter } = await import("../../src/db-base.js");
+    const fake = await createNodeSQLiteFake();
+    const db = new NodeSQLiteAdapter(fake);
     expect(typeof db.pragma).toBe("function");
     expect(typeof db.exec).toBe("function");
     expect(typeof db.prepare).toBe("function");

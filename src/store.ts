@@ -9,7 +9,7 @@
  */
 
 import type { Database as DatabaseInstance } from "better-sqlite3";
-import { loadDatabase, applyWALPragmas, closeDB, withRetry } from "./db-base.js";
+import { loadDatabase, applyWALPragmas, closeDB, cleanOrphanedWALFiles, withRetry, deleteDBFiles, isSQLiteCorruptionError } from "./db-base.js";
 import type { PreparedStatement } from "./db-base.js";
 import { readFileSync, readdirSync, unlinkSync, existsSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -63,26 +63,60 @@ const STOPWORDS = new Set([
 // Helpers
 // ─────────────────────────────────────────────────────────
 
-function sanitizeQuery(query: string, mode: "AND" | "OR" = "AND"): string {
-  const words = query
-    .replace(/['"(){}[\]*:^~]/g, " ")
-    .split(/\s+/)
-    .filter(
-      (w) =>
-        w.length > 0 &&
-        !["AND", "OR", "NOT", "NEAR"].includes(w.toUpperCase()),
-    );
-
-  if (words.length === 0) return '""';
-  return words.map((w) => `"${w}"`).join(mode === "OR" ? " OR " : " ");
+/**
+ * Remove case-insensitive duplicate tokens while preserving the first
+ * occurrence's original casing. FTS5's unicode61 tokenizer lowercases on
+ * both sides, so `"Error" OR "error"` produces no extra recall — just
+ * redundant index lookups. Dedup keeps the compiled query minimal.
+ */
+function dedupeTokens(tokens: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const t of tokens) {
+    const key = t.toLowerCase();
+    if (!seen.has(key)) {
+      seen.add(key);
+      out.push(t);
+    }
+  }
+  return out;
 }
 
-function sanitizeTrigramQuery(query: string, mode: "AND" | "OR" = "AND"): string {
+export function sanitizeQuery(query: string, mode: "AND" | "OR" = "AND"): string {
+  const words = dedupeTokens(
+    query
+      .replace(/['"(){}[\]*:^~]/g, " ")
+      .split(/\s+/)
+      .filter(
+        (w) =>
+          w.length > 0 &&
+          !["AND", "OR", "NOT", "NEAR"].includes(w.toUpperCase()),
+      ),
+  );
+
+  if (words.length === 0) return '""';
+
+  // Filter stopwords to improve BM25 ranking — common terms like "update",
+  // "test", "fix" appear everywhere and dilute relevance scoring.
+  // Fall back to unfiltered words if ALL terms are stopwords.
+  const meaningful = words.filter((w) => !STOPWORDS.has(w.toLowerCase()));
+  const final = meaningful.length > 0 ? meaningful : words;
+
+  return final.map((w) => `"${w}"`).join(mode === "OR" ? " OR " : " ");
+}
+
+export function sanitizeTrigramQuery(query: string, mode: "AND" | "OR" = "AND"): string {
   const cleaned = query.replace(/["'(){}[\]*:^~]/g, "").trim();
   if (cleaned.length < 3) return "";
-  const words = cleaned.split(/\s+/).filter((w) => w.length >= 3);
+  const words = dedupeTokens(
+    cleaned.split(/\s+/).filter((w) => w.length >= 3),
+  );
   if (words.length === 0) return "";
-  return words.map((w) => `"${w}"`).join(mode === "OR" ? " OR " : " ");
+
+  const meaningful = words.filter((w) => !STOPWORDS.has(w.toLowerCase()));
+  const final = meaningful.length > 0 ? meaningful : words;
+
+  return final.map((w) => `"${w}"`).join(mode === "OR" ? " OR " : " ");
 }
 
 function levenshtein(a: string, b: string): number {
@@ -298,12 +332,52 @@ export class ContentStore {
   #stmtStats!: PreparedStatement;
   #stmtSourceMeta!: PreparedStatement;
 
+  // Cleanup path
+  #stmtCleanupChunks!: PreparedStatement;
+  #stmtCleanupChunksTrigram!: PreparedStatement;
+  #stmtCleanupSources!: PreparedStatement;
+
+  // FTS5 optimization: track inserts and optimize periodically to defragment
+  // the index. FTS5 b-trees fragment over many insert/delete cycles, degrading
+  // search performance. SQLite's built-in 'optimize' merges b-tree segments.
+  #insertCount = 0;
+  static readonly OPTIMIZE_EVERY = 50;
+
+  // Fuzzy correction cache (process-local LRU). fuzzyCorrect() hits the vocab
+  // DB and runs levenshtein against every candidate within length tolerance,
+  // which is CPU-linear in |candidates|. Repeated queries ("erro", "erro" …)
+  // recompute the same answer. The vocabulary table is insert-only, so cache
+  // entries only become stale when new words enter — we clear on actual insert.
+  #fuzzyCache = new Map<string, string | null>();
+  static readonly FUZZY_CACHE_SIZE = 256;
+
   constructor(dbPath?: string) {
     const Database = loadDatabase();
     this.#dbPath =
       dbPath ?? join(tmpdir(), `context-mode-${process.pid}.db`);
-    this.#db = new Database(this.#dbPath, { timeout: 30000 });
-    applyWALPragmas(this.#db);
+    cleanOrphanedWALFiles(this.#dbPath);
+    let db: DatabaseInstance;
+    try {
+      db = new Database(this.#dbPath, { timeout: 30000 });
+      applyWALPragmas(db);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (isSQLiteCorruptionError(msg)) {
+        deleteDBFiles(this.#dbPath);
+        cleanOrphanedWALFiles(this.#dbPath);
+        try {
+          db = new Database(this.#dbPath, { timeout: 30000 });
+          applyWALPragmas(db);
+        } catch (retryErr) {
+          throw new Error(
+            `Failed to create fresh DB after deleting corrupt file: ${retryErr instanceof Error ? retryErr.message : String(retryErr)}`
+          );
+        }
+      } else {
+        throw err;
+      }
+    }
+    this.#db = db;
     this.#initSchema();
     this.#prepareStatements();
   }
@@ -587,6 +661,17 @@ export class ContentStore {
         (SELECT COUNT(*) FROM chunks) AS chunks,
         (SELECT COUNT(*) FROM chunks WHERE content_type = 'code') AS codeChunks
     `);
+
+    // Cleanup path — cached to avoid recompiling SQL on each periodic call
+    this.#stmtCleanupChunks = this.#db.prepare(
+      "DELETE FROM chunks WHERE source_id IN (SELECT id FROM sources WHERE datetime(indexed_at) < datetime('now', '-' || ? || ' days'))",
+    );
+    this.#stmtCleanupChunksTrigram = this.#db.prepare(
+      "DELETE FROM chunks_trigram WHERE source_id IN (SELECT id FROM sources WHERE datetime(indexed_at) < datetime('now', '-' || ? || ' days'))",
+    );
+    this.#stmtCleanupSources = this.#db.prepare(
+      "DELETE FROM sources WHERE datetime(indexed_at) < datetime('now', '-' || ? || ' days')",
+    );
   }
 
   // ── Index ──
@@ -627,11 +712,11 @@ export class ContentStore {
 
     const chunks = this.#chunkPlainText(content, linesPerChunk);
 
-    return this.#insertChunks(
+    return withRetry(() => this.#insertChunks(
       chunks.map((c) => ({ ...c, hasCode: false })),
       source,
       content,
-    );
+    ));
   }
 
   // ── Index JSON ──
@@ -666,7 +751,7 @@ export class ContentStore {
       return this.indexPlainText(content, source);
     }
 
-    return this.#insertChunks(chunks, source, content);
+    return withRetry(() => this.#insertChunks(chunks, source, content));
   }
 
   // ── Shared DB Insertion ──
@@ -706,6 +791,15 @@ export class ContentStore {
 
     const sourceId = transaction();
     if (text) this.#extractAndStoreVocabulary(text);
+
+    // Periodically optimize FTS5 indexes to merge b-tree segments.
+    // Fragmentation accumulates over insert/delete cycles (dedup re-indexes
+    // every source on update). The 'optimize' command merges segments into
+    // a single b-tree, improving search latency for long-running sessions.
+    this.#insertCount++;
+    if (this.#insertCount % ContentStore.OPTIMIZE_EVERY === 0) {
+      this.#optimizeFTS();
+    }
 
     return {
       sourceId,
@@ -800,7 +894,7 @@ export class ContentStore {
       params = [sanitized, limit];
     }
 
-    return this.#mapSearchRows(stmt.all(...params) as SearchRow[]);
+    return withRetry(() => this.#mapSearchRows(stmt.all(...params) as SearchRow[]));
   }
 
   // ── Fuzzy Correction (Layer 3) ──
@@ -808,6 +902,14 @@ export class ContentStore {
   fuzzyCorrect(query: string): string | null {
     const word = query.toLowerCase().trim();
     if (word.length < 3) return null;
+
+    // Cache hit: promote to tail (Map preserves insertion order → LRU).
+    if (this.#fuzzyCache.has(word)) {
+      const cached = this.#fuzzyCache.get(word) ?? null;
+      this.#fuzzyCache.delete(word);
+      this.#fuzzyCache.set(word, cached);
+      return cached;
+    }
 
     const maxDist = maxEditDistance(word.length);
 
@@ -818,9 +920,13 @@ export class ContentStore {
 
     let bestWord: string | null = null;
     let bestDist = maxDist + 1;
+    let exactMatch = false;
 
     for (const { word: candidate } of candidates) {
-      if (candidate === word) return null; // exact match — no correction
+      if (candidate === word) {
+        exactMatch = true;
+        break;
+      }
       const dist = levenshtein(word, candidate);
       if (dist < bestDist) {
         bestDist = dist;
@@ -828,7 +934,16 @@ export class ContentStore {
       }
     }
 
-    return bestDist <= maxDist ? bestWord : null;
+    const result = exactMatch ? null : bestDist <= maxDist ? bestWord : null;
+
+    // Evict the oldest entry before insert if we hit the size cap.
+    if (this.#fuzzyCache.size >= ContentStore.FUZZY_CACHE_SIZE) {
+      const oldestKey = this.#fuzzyCache.keys().next().value;
+      if (oldestKey !== undefined) this.#fuzzyCache.delete(oldestKey);
+    }
+    this.#fuzzyCache.set(word, result);
+
+    return result;
   }
 
   // ── Reciprocal Rank Fusion (Cormack et al. 2009) ──
@@ -881,27 +996,39 @@ export class ContentStore {
     results: SearchResult[],
     query: string,
   ): SearchResult[] {
-    const terms = query
+    const allTerms = query
       .toLowerCase()
       .split(/\s+/)
       .filter((w) => w.length >= 2);
-
-    // Single-term queries: no reranking needed
-    if (terms.length < 2) return results;
+    // Exclude stopwords from proximity/title scoring — they match everywhere
+    // and inflate boosts for irrelevant chunks. Keep all terms as fallback.
+    const filtered = allTerms.filter((w) => !STOPWORDS.has(w));
+    const terms = filtered.length > 0 ? filtered : allTerms;
 
     return results
       .map((r) => {
-        const content = r.content.toLowerCase();
-        const positions = terms.map((t) => findAllPositions(content, t));
+        // Title-match boost: query terms found in the chunk title get a boost.
+        // Code chunks get a stronger title boost (function/class names are high
+        // signal) while prose chunks get a moderate one (headings are useful but
+        // body carries more weight).
+        const titleLower = r.title.toLowerCase();
+        const titleHits = terms.filter((t) => titleLower.includes(t)).length;
+        const titleWeight = r.contentType === "code" ? 0.6 : 0.3;
+        const titleBoost = titleHits > 0 ? titleWeight * (titleHits / terms.length) : 0;
 
-        // If any term is missing from content, no proximity boost
-        if (positions.some((p) => p.length === 0)) {
-          return { result: r, boost: 0 };
+        // Proximity boost for multi-term queries
+        let proximityBoost = 0;
+        if (terms.length >= 2) {
+          const content = r.content.toLowerCase();
+          const positions = terms.map((t) => findAllPositions(content, t));
+
+          if (!positions.some((p) => p.length === 0)) {
+            const minSpan = findMinSpan(positions);
+            proximityBoost = 1 / (1 + minSpan / Math.max(content.length, 1));
+          }
         }
 
-        const minSpan = findMinSpan(positions);
-        const boost = 1 / (1 + minSpan / Math.max(content.length, 1));
-        return { result: r, boost };
+        return { result: r, boost: titleBoost + proximityBoost };
       })
       .sort((a, b) => b.boost - a.boost || a.result.rank - b.result.rank)
       .map(({ result }) => result);
@@ -924,11 +1051,13 @@ export class ContentStore {
     }
 
     // Step 2: Fuzzy correction → RRF re-run
+    // Skip stopwords — they'll be filtered by sanitizeQuery anyway, and each
+    // fuzzyCorrect call hits the vocab DB + runs levenshtein comparisons.
     const words = query
       .toLowerCase()
       .trim()
       .split(/\s+/)
-      .filter((w) => w.length >= 3);
+      .filter((w) => w.length >= 3 && !STOPWORDS.has(w));
     const original = words.join(" ");
     const correctedWords = words.map((w) => this.fuzzyCorrect(w) ?? w);
     const correctedQuery = correctedWords.join(" ");
@@ -1051,19 +1180,10 @@ export class ContentStore {
    * Returns count of deleted sources.
    */
   cleanupStaleSources(maxAgeDays: number): number {
-    const deleteChunks = this.#db.prepare(
-      "DELETE FROM chunks WHERE source_id IN (SELECT id FROM sources WHERE datetime(indexed_at) < datetime('now', '-' || ? || ' days'))",
-    );
-    const deleteChunksTrigram = this.#db.prepare(
-      "DELETE FROM chunks_trigram WHERE source_id IN (SELECT id FROM sources WHERE datetime(indexed_at) < datetime('now', '-' || ? || ' days'))",
-    );
-    const deleteSources = this.#db.prepare(
-      "DELETE FROM sources WHERE datetime(indexed_at) < datetime('now', '-' || ? || ' days')",
-    );
     const cleanup = this.#db.transaction((days: number) => {
-      deleteChunks.run(days);
-      deleteChunksTrigram.run(days);
-      return deleteSources.run(days);
+      this.#stmtCleanupChunks.run(days);
+      this.#stmtCleanupChunksTrigram.run(days);
+      return this.#stmtCleanupSources.run(days);
     });
     const info = cleanup(maxAgeDays);
     return info.changes;
@@ -1078,7 +1198,16 @@ export class ContentStore {
     }
   }
 
+  /** Merge FTS5 b-tree segments for both porter and trigram indexes. */
+  #optimizeFTS(): void {
+    try {
+      this.#db.exec("INSERT INTO chunks(chunks) VALUES('optimize')");
+      this.#db.exec("INSERT INTO chunks_trigram(chunks_trigram) VALUES('optimize')");
+    } catch { /* best effort — don't block indexing */ }
+  }
+
   close(): void {
+    this.#optimizeFTS(); // defragment before close
     closeDB(this.#db); // WAL checkpoint before close — important for persistent DBs
   }
 
@@ -1092,11 +1221,18 @@ export class ContentStore {
 
     const unique = [...new Set(words)];
 
+    let inserted = 0;
     this.#db.transaction(() => {
       for (const word of unique) {
-        this.#stmtInsertVocab.run(word);
+        const info = this.#stmtInsertVocab.run(word);
+        inserted += info.changes;
       }
     })();
+
+    // Invalidate fuzzy cache when new vocab words actually land. INSERT OR
+    // IGNORE reports changes=0 for duplicates, so re-indexing identical
+    // content does not thrash the cache during iterative workflows.
+    if (inserted > 0) this.#fuzzyCache.clear();
   }
 
   // ── Chunking ──

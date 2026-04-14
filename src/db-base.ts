@@ -9,7 +9,7 @@
 import type DatabaseConstructor from "better-sqlite3";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 import { createRequire } from "node:module";
-import { unlinkSync } from "node:fs";
+import { existsSync, unlinkSync, renameSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -104,6 +104,79 @@ export class BunSQLiteAdapter {
 }
 
 // ─────────────────────────────────────────────────────────
+// node:sqlite adapter (#228)
+// ─────────────────────────────────────────────────────────
+
+/**
+ * Wraps node:sqlite's DatabaseSync to provide better-sqlite3-compatible API.
+ * Bridges: .pragma(), .transaction(). Everything else is passthrough.
+ * Eliminates native addon SIGSEGV on Linux (nodejs/node#62515).
+ */
+export class NodeSQLiteAdapter {
+  #raw: any; // DatabaseSync instance
+
+  constructor(rawDb: any) {
+    this.#raw = rawDb;
+  }
+
+  pragma(source: string): any {
+    // "journal_mode = WAL" → PRAGMA journal_mode = WAL
+    // "table_xinfo(session_events)" → PRAGMA table_xinfo(session_events)
+    // "wal_checkpoint(TRUNCATE)" → PRAGMA wal_checkpoint(TRUNCATE)
+    const stmt = this.#raw.prepare(`PRAGMA ${source}`);
+    const rows = stmt.all();
+    if (!rows || rows.length === 0) return undefined;
+    if (rows.length > 1) return rows;
+    const values = Object.values(rows[0] as Record<string, unknown>);
+    return values.length === 1 ? values[0] : rows[0];
+  }
+
+  exec(sql: string): any {
+    // node:sqlite's exec() supports multi-statement natively
+    this.#raw.exec(sql);
+    return this;
+  }
+
+  prepare(sql: string): any {
+    const stmt = this.#raw.prepare(sql);
+    return {
+      run: (...args: unknown[]) => stmt.run(...args),
+      get: (...args: unknown[]) => stmt.get(...args),
+      all: (...args: unknown[]) => stmt.all(...args),
+      iterate: (...args: unknown[]) => {
+        // node:sqlite uses Symbol.iterator on StatementSync, not .iterate()
+        // Check if iterate exists, otherwise use Symbol.iterator
+        if (typeof stmt.iterate === 'function') {
+          return stmt.iterate(...args);
+        }
+        // Fallback: use all() to create an iterator
+        const rows = stmt.all(...args);
+        return rows[Symbol.iterator]();
+      },
+    };
+  }
+
+  transaction(fn: (...args: any[]) => any): any {
+    // node:sqlite has no transaction() method — manual BEGIN/COMMIT/ROLLBACK
+    return (...args: any[]) => {
+      this.#raw.exec("BEGIN");
+      try {
+        const result = fn(...args);
+        this.#raw.exec("COMMIT");
+        return result;
+      } catch (err) {
+        this.#raw.exec("ROLLBACK");
+        throw err;
+      }
+    };
+  }
+
+  close(): void {
+    this.#raw.close();
+  }
+}
+
+// ─────────────────────────────────────────────────────────
 // Lazy loader
 // ─────────────────────────────────────────────────────────
 
@@ -112,7 +185,8 @@ let _Database: typeof DatabaseConstructor | null = null;
 /**
  * Lazy-load the SQLite driver for the current runtime.
  * Bun → bun:sqlite via BunSQLiteAdapter (issue #45).
- * Node → better-sqlite3 (native addon).
+ * Linux Node → node:sqlite via NodeSQLiteAdapter (issue #228).
+ * Other Node → better-sqlite3 (native addon).
  */
 export function loadDatabase(): typeof DatabaseConstructor {
   if (!_Database) {
@@ -127,10 +201,31 @@ export function loadDatabase(): typeof DatabaseConstructor {
           readonly: opts?.readonly,
           create: true,
         });
-        return new BunSQLiteAdapter(raw);
+        const adapter = new BunSQLiteAdapter(raw);
+        // Propagate busy_timeout — better-sqlite3 does this via constructor
+        // option but bun:sqlite does not, so we set it via pragma (#243)
+        if (opts?.timeout) {
+          adapter.pragma(`busy_timeout = ${opts.timeout}`);
+        }
+        return adapter;
       } as any;
+    } else if (process.platform === "linux") {
+      // Linux — try node:sqlite to avoid native addon SIGSEGV (nodejs/node#62515).
+      // node:sqlite is built into Node >= 22.5, no flag needed since 22.13.
+      try {
+        const { DatabaseSync } = require(["node", "sqlite"].join(":"));
+        _Database = function NodeDatabaseFactory(path: string, opts?: any) {
+          const raw = new DatabaseSync(path, {
+            readOnly: opts?.readonly ?? false,
+          });
+          return new NodeSQLiteAdapter(raw);
+        } as any;
+      } catch {
+        // node:sqlite not available — fall through to better-sqlite3
+        _Database = require("better-sqlite3") as typeof DatabaseConstructor;
+      }
     } else {
-      // Node.js — use better-sqlite3.
+      // Non-Linux Node.js — use better-sqlite3.
       _Database = require("better-sqlite3") as typeof DatabaseConstructor;
     }
   }
@@ -154,11 +249,30 @@ export function loadDatabase(): typeof DatabaseConstructor {
 export function applyWALPragmas(db: DatabaseInstance): void {
   db.pragma("journal_mode = WAL");
   db.pragma("synchronous = NORMAL");
+  // Memory-map the DB file for read-heavy FTS5 search workloads.
+  // Eliminates read() syscalls — the kernel serves pages directly from
+  // the page cache. 256MB is a safe upper bound (SQLite only maps up to
+  // the actual file size). Falls back gracefully on platforms where mmap
+  // is unavailable or restricted.
+  try { db.pragma("mmap_size = 268435456"); } catch { /* unsupported runtime */ }
 }
 
 // ─────────────────────────────────────────────────────────
 // DB file helpers
 // ─────────────────────────────────────────────────────────
+
+/**
+ * Remove orphaned WAL/SHM files when the main DB file doesn't exist.
+ * On Windows, stale -wal/-shm files from crashed processes cause
+ * "file is not a database" errors when creating a fresh DB.
+ */
+export function cleanOrphanedWALFiles(dbPath: string): void {
+  if (!existsSync(dbPath)) {
+    for (const suffix of ["-wal", "-shm"]) {
+      try { unlinkSync(dbPath + suffix); } catch { /* ignore */ }
+    }
+  }
+}
 
 /**
  * Delete all three SQLite files for a given db path (main, WAL, SHM).
@@ -240,6 +354,36 @@ export function withRetry<T>(fn: () => T, delays: number[] = [100, 500, 2000]): 
 }
 
 // ─────────────────────────────────────────────────────────
+// Corrupt DB recovery (#244)
+// ─────────────────────────────────────────────────────────
+
+/**
+ * Detect SQLite corruption errors that warrant a rename-and-recreate.
+ * Matches SQLITE_CORRUPT, SQLITE_NOTADB, and their human-readable equivalents.
+ */
+export function isSQLiteCorruptionError(msg: string): boolean {
+  return (
+    msg.includes("SQLITE_CORRUPT") ||
+    msg.includes("SQLITE_NOTADB") ||
+    msg.includes("database disk image is malformed") ||
+    msg.includes("file is not a database")
+  );
+}
+
+/**
+ * Rename a corrupt DB and its WAL/SHM files so a fresh DB can be created.
+ * Best-effort — individual rename failures are silently ignored.
+ */
+export function renameCorruptDB(dbPath: string): void {
+  const ts = Date.now();
+  for (const suffix of ["", "-wal", "-shm"]) {
+    try {
+      renameSync(dbPath + suffix, `${dbPath}${suffix}.corrupt-${ts}`);
+    } catch { /* file may not exist */ }
+  }
+}
+
+// ─────────────────────────────────────────────────────────
 // Base class
 // ─────────────────────────────────────────────────────────
 
@@ -267,7 +411,7 @@ const _liveDBs: Set<DatabaseInstance> = (() => {
     g[_kLiveDBs] = new Set<DatabaseInstance>();
     process.on("exit", () => {
       for (const db of g[_kLiveDBs]!) {
-        try { db.close(); } catch { /* already closed */ }
+        closeDB(db);
       }
       g[_kLiveDBs]!.clear();
     });
@@ -282,9 +426,30 @@ export abstract class SQLiteBase {
   constructor(dbPath: string) {
     const Database = loadDatabase();
     this.#dbPath = dbPath;
-    this.#db = new Database(dbPath, { timeout: 30000 });
+    cleanOrphanedWALFiles(dbPath);
+    let db: DatabaseInstance;
+    try {
+      db = new Database(dbPath, { timeout: 30000 });
+      applyWALPragmas(db);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (isSQLiteCorruptionError(msg)) {
+        renameCorruptDB(dbPath);
+        cleanOrphanedWALFiles(dbPath);
+        try {
+          db = new Database(dbPath, { timeout: 30000 });
+          applyWALPragmas(db);
+        } catch (retryErr) {
+          throw new Error(
+            `Failed to create fresh DB after renaming corrupt file: ${retryErr instanceof Error ? retryErr.message : String(retryErr)}`
+          );
+        }
+      } else {
+        throw err;
+      }
+    }
+    this.#db = db;
     _liveDBs.add(this.#db);
-    applyWALPragmas(this.#db);
     this.initSchema();
     this.prepareStatements();
   }

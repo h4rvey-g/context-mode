@@ -12,7 +12,7 @@ import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { ContentStore, cleanupStaleDBs } from "../src/store.js";
-import { withRetry } from "../src/db-base.js";
+import { withRetry, closeDB, loadDatabase, applyWALPragmas } from "../src/db-base.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const fixtureDir = join(__dirname, "fixtures");
@@ -1280,5 +1280,383 @@ describe("SQLITE_BUSY retry logic", () => {
       }, [0, 0, 0]);
     }).toThrow("UNIQUE constraint failed");
     expect(attempts).toBe(1);
+  });
+});
+
+// ── withRetry coverage for all write/read paths ──
+
+describe("withRetry edge cases", () => {
+  test("withRetry succeeds on first attempt", () => {
+    const result = withRetry(() => "immediate", [0, 0, 0]);
+    expect(result).toBe("immediate");
+  });
+
+  test("withRetry recovers on last retry", () => {
+    let attempts = 0;
+    const result = withRetry(() => {
+      attempts++;
+      if (attempts <= 3) {
+        throw new Error("SQLITE_BUSY: database is locked");
+      }
+      return "recovered";
+    }, [0, 0, 0]);
+    expect(result).toBe("recovered");
+    expect(attempts).toBe(4); // 1 initial + 3 retries
+  });
+
+  test("withRetry handles 'database is locked' without SQLITE_BUSY prefix", () => {
+    let attempts = 0;
+    const result = withRetry(() => {
+      attempts++;
+      if (attempts < 2) {
+        throw new Error("database is locked");
+      }
+      return "ok";
+    }, [0, 0, 0]);
+    expect(result).toBe("ok");
+    expect(attempts).toBe(2);
+  });
+
+  test("withRetry with empty delays array throws immediately on BUSY", () => {
+    expect(() => {
+      withRetry(() => {
+        throw new Error("SQLITE_BUSY: database is locked");
+      }, []);
+    }).toThrow(/SQLITE_BUSY.*0 retries/);
+  });
+
+  test("withRetry preserves return type", () => {
+    const obj = withRetry(() => ({ key: "value", num: 42 }), [0]);
+    expect(obj).toEqual({ key: "value", num: 42 });
+  });
+});
+
+// ── Concurrent write resilience ──
+
+describe("concurrent DB access", () => {
+  test("two ContentStore instances can write to the same DB file", () => {
+    const dbPath = join(tmpdir(), `concurrent-write-${Date.now()}.db`);
+    const store1 = new ContentStore(dbPath);
+    const store2 = new ContentStore(dbPath);
+
+    store1.index({ content: "# First\n\nContent from store 1.", source: "store1-doc" });
+    store2.index({ content: "# Second\n\nContent from store 2.", source: "store2-doc" });
+
+    // Both sources should be searchable from either store
+    const results1 = store1.search("Content from store", 10);
+    expect(results1.length).toBeGreaterThanOrEqual(2);
+
+    const results2 = store2.search("Content from store", 10);
+    expect(results2.length).toBeGreaterThanOrEqual(2);
+
+    store1.cleanup();
+    store2.close();
+  });
+
+  test("indexPlainText is protected by withRetry", () => {
+    // Verify indexPlainText doesn't throw on transient BUSY by testing
+    // concurrent plain text indexing on same DB
+    const dbPath = join(tmpdir(), `concurrent-plaintext-${Date.now()}.db`);
+    const store1 = new ContentStore(dbPath);
+    const store2 = new ContentStore(dbPath);
+
+    store1.indexPlainText("alpha bravo charlie", "plain-1");
+    store2.indexPlainText("delta echo foxtrot", "plain-2");
+
+    const r1 = store1.search("alpha bravo", 5, "plain-1");
+    expect(r1.length).toBeGreaterThan(0);
+    const r2 = store1.search("delta echo", 5, "plain-2");
+    expect(r2.length).toBeGreaterThan(0);
+
+    store1.cleanup();
+    store2.close();
+  });
+
+  test("indexJSON is protected by withRetry", () => {
+    const dbPath = join(tmpdir(), `concurrent-json-${Date.now()}.db`);
+    const store1 = new ContentStore(dbPath);
+    const store2 = new ContentStore(dbPath);
+
+    store1.indexJSON(JSON.stringify({ users: [{ name: "Alice" }] }), "json-1");
+    store2.indexJSON(JSON.stringify({ items: [{ id: 1 }] }), "json-2");
+
+    const results = store1.search("Alice", 5);
+    expect(results.length).toBeGreaterThan(0);
+
+    store1.cleanup();
+    store2.close();
+  });
+
+  test("search and searchTrigram work under concurrent writes", () => {
+    const dbPath = join(tmpdir(), `concurrent-search-${Date.now()}.db`);
+    const store1 = new ContentStore(dbPath);
+    const store2 = new ContentStore(dbPath);
+
+    store1.index({ content: "# Guide\n\nReact hooks are powerful.", source: "guide" });
+
+    // Write from store2 while store1 searches
+    store2.index({ content: "# Tutorial\n\nVue composition API.", source: "tutorial" });
+    const results = store1.search("hooks", 5);
+    expect(results.length).toBeGreaterThan(0);
+
+    store1.cleanup();
+    store2.close();
+  });
+});
+
+// ── WAL checkpoint on close (#244) ──
+
+describe("closeDB — WAL checkpoint", () => {
+  test("closeDB checkpoints WAL so no -wal file remains", () => {
+    const dbPath = join(tmpdir(), `wal-test-${Date.now()}.db`);
+    const Database = loadDatabase();
+    const db = Database(dbPath, { timeout: 30000 });
+    applyWALPragmas(db);
+    db.exec("CREATE TABLE t (id INTEGER PRIMARY KEY, val TEXT)");
+    db.exec("INSERT INTO t VALUES (1, 'hello')");
+
+    // WAL file should exist after writes in WAL mode
+    expect(existsSync(dbPath + "-wal")).toBe(true);
+
+    closeDB(db);
+
+    // After closeDB, WAL should be checkpointed (truncated to 0 or removed)
+    // The file may still exist but should be empty, or may not exist
+    const walExists = existsSync(dbPath + "-wal");
+    if (walExists) {
+      const walSize = readFileSync(dbPath + "-wal").length;
+      expect(walSize).toBe(0);
+    }
+
+    // cleanup
+    for (const s of ["", "-wal", "-shm"]) {
+      try { unlinkSync(dbPath + s); } catch {}
+    }
+  });
+});
+
+// ── Corrupt DB recovery (#244) ──
+
+describe("ContentStore — corrupt DB recovery", () => {
+  // Windows file locking prevents WAL/SHM deletion while another worker holds them open
+  test.skipIf(process.platform === "win32")("recovers from corrupt DB file by deleting and recreating", () => {
+    const dbPath = join(tmpdir(), `corrupt-store-${Date.now()}.db`);
+    // Write garbage to simulate corrupt DB
+    writeFileSync(dbPath, "THIS IS NOT A SQLITE DATABASE FILE");
+    writeFileSync(dbPath + "-wal", "CORRUPT WAL");
+
+    // Should recover: delete corrupt files and create fresh DB
+    const store = new ContentStore(dbPath);
+    // Store should be functional
+    store.index({ content: "test content", source: "test" });
+    const results = store.search("test content");
+    expect(results.length).toBeGreaterThan(0);
+
+    store.cleanup();
+  });
+
+  test("non-SQLite errors still throw", () => {
+    // A path to a directory (not a file) should throw a non-corruption error
+    expect(() => new ContentStore(tmpdir())).toThrow();
+  });
+});
+
+// ═══════════════════════════════════════════════════════════
+// mmap_size pragma
+// ═══════════════════════════════════════════════════════════
+
+describe("mmap_size pragma", () => {
+  test("mmap_size is set on new ContentStore", () => {
+    const dbPath = join(tmpdir(), `ctx-mmap-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
+    const store = new ContentStore(dbPath);
+    store.indexPlainText("Memory-mapped I/O test content for FTS5 search", "mmap-test");
+    const results = store.search("memory-mapped");
+    expect(results.length).toBeGreaterThan(0);
+    store.cleanup();
+  });
+});
+
+// ═══════════════════════════════════════════════════════════
+// FTS5 Periodic Optimization
+// ═══════════════════════════════════════════════════════════
+
+describe("FTS5 periodic optimize", () => {
+  test("search works correctly after OPTIMIZE_EVERY inserts", () => {
+    const dbPath = join(tmpdir(), `ctx-optimize-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
+    const store = new ContentStore(dbPath);
+
+    for (let i = 0; i < ContentStore.OPTIMIZE_EVERY + 5; i++) {
+      store.indexPlainText(`Document number ${i} about testing optimization`, `source-${i}`);
+    }
+
+    const results = store.search("testing optimization");
+    expect(results.length).toBeGreaterThan(0);
+    expect(results[0].content).toContain("testing optimization");
+
+    store.cleanup();
+  });
+
+  test("close() does not throw even after many inserts", () => {
+    const dbPath = join(tmpdir(), `ctx-optimize-close-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
+    const store = new ContentStore(dbPath);
+
+    for (let i = 0; i < 10; i++) {
+      store.indexPlainText(`Content ${i}`, `src-${i}`);
+    }
+
+    expect(() => store.close()).not.toThrow();
+  });
+
+  test("OPTIMIZE_EVERY is a reasonable value", () => {
+    expect(ContentStore.OPTIMIZE_EVERY).toBeGreaterThanOrEqual(20);
+    expect(ContentStore.OPTIMIZE_EVERY).toBeLessThanOrEqual(200);
+  });
+});
+
+describe("Sanitize query token deduplication", () => {
+  test("sanitizeQuery removes duplicate tokens (case-insensitive)", async () => {
+    const { sanitizeQuery } = await import("../src/store.js");
+    assert.equal(
+      sanitizeQuery("error error error"),
+      '"error"',
+      "three identical tokens should compile to a single quoted term",
+    );
+    assert.equal(
+      sanitizeQuery("Error ERROR error"),
+      '"Error"',
+      "case differences should not create duplicate tokens",
+    );
+  });
+
+  test("sanitizeQuery preserves first-occurrence casing after dedup", async () => {
+    const { sanitizeQuery } = await import("../src/store.js");
+    assert.equal(sanitizeQuery("Database database DATABASE"), '"Database"');
+  });
+
+  test("sanitizeQuery preserves distinct tokens and their order", async () => {
+    const { sanitizeQuery } = await import("../src/store.js");
+    // "update" is a stopword, but the meaningful terms remain distinct.
+    assert.equal(
+      sanitizeQuery("database query database index query"),
+      '"database" "query" "index"',
+      "distinct tokens should be kept; duplicates collapsed in first-seen order",
+    );
+  });
+
+  test("sanitizeTrigramQuery removes duplicate tokens", async () => {
+    const { sanitizeTrigramQuery } = await import("../src/store.js");
+    assert.equal(
+      sanitizeTrigramQuery("error error error"),
+      '"error"',
+    );
+    assert.equal(
+      sanitizeTrigramQuery("error ERROR Error"),
+      '"error"',
+      "case-insensitive dedup across all three trigram sanitize paths",
+    );
+  });
+
+  test("dedup in OR mode collapses duplicates but preserves distinct terms", async () => {
+    const { sanitizeQuery } = await import("../src/store.js");
+    assert.equal(
+      sanitizeQuery("error error database", "OR"),
+      '"error" OR "database"',
+    );
+  });
+
+  test("search returns identical results for duplicated and deduplicated queries", () => {
+    const store = createStore();
+    store.index({
+      content:
+        "# Error Handling\n\nThe database connection threw an error during migration.\n\n# Overview\n\nPlain content.",
+      source: "dedup-behavioral",
+    });
+
+    const duplicated = store.search("error error error database database");
+    const unique = store.search("error database");
+
+    assert.equal(duplicated.length, unique.length);
+    for (let i = 0; i < duplicated.length; i++) {
+      assert.equal(duplicated[i].title, unique[i].title);
+      assert.equal(duplicated[i].content, unique[i].content);
+    }
+    store.close();
+  });
+});
+
+describe("Stopword filtering in search queries", () => {
+  test("stopwords are filtered from search — meaningful terms drive ranking", () => {
+    const store = createStore();
+    // "fix" and "update" are stopwords in the domain list.
+    // "database" and "connection" are meaningful terms.
+    store.index({
+      content:
+        "# Database Connection Pool\n\nManage database connections with pooling.\n\n# Update Log\n\nFix applied to update module on Tuesday.",
+      source: "stopword-search",
+    });
+
+    // Search with stopwords mixed in — results should prioritize "database connection"
+    const results = store.search("fix database connection", 2);
+    assert.ok(results.length > 0, "Should return results");
+    assert.ok(
+      results[0].content.toLowerCase().includes("database") &&
+        results[0].content.toLowerCase().includes("connection"),
+      `Top result should match meaningful terms 'database connection', got: ${results[0].title}`,
+    );
+    store.close();
+  });
+
+  test("all-stopword query still returns results (fallback)", () => {
+    const store = createStore();
+    store.index({
+      content: "# Updates\n\nUpdate the test runner to fix the issue.\n\n# Other\n\nUnrelated content.",
+      source: "all-stopwords",
+    });
+
+    // "update test fix" are all stopwords — should fall back to using them
+    const results = store.search("update test fix", 2);
+    assert.ok(results.length > 0, "All-stopword query should still return results via fallback");
+    store.close();
+  });
+
+  test("stopwords filtered from trigram search", () => {
+    const store = createStore();
+    store.index({
+      content:
+        "# Encryption Module\n\nAES encryption with key rotation.\n\n# Testing Guide\n\nRun tests using the test framework.",
+      source: "trigram-stopwords",
+    });
+
+    // "using" is a stopword, "encryption" is meaningful
+    const results = store.searchTrigram("using encryption", 2);
+    assert.ok(results.length > 0, "Should return results");
+    assert.ok(
+      results[0].content.toLowerCase().includes("encryption"),
+      `Should match on meaningful term 'encryption', got: ${results[0].title}`,
+    );
+    store.close();
+  });
+
+  test("proximity reranking ignores stopwords for boost calculation", () => {
+    const store = createStore();
+    // Two chunks: one has "database error" close together, the other has them far apart
+    // but has "fix" (stopword) nearby
+    store.index({
+      content:
+        "# Error Handling\n\nThe database threw an error during migration.\n\n# Fix Log\n\nWe fix things. Much later in this document we mention database. Even later we see error.",
+      source: "proximity-stopwords",
+    });
+
+    const results = store.searchWithFallback("fix database error", 2);
+    assert.ok(results.length > 0, "Should return results");
+    // The chunk with "database" and "error" close together should rank higher
+    // because "fix" (stopword) is excluded from proximity calculation
+    assert.ok(
+      results[0].content.toLowerCase().includes("database") &&
+        results[0].content.toLowerCase().includes("error") &&
+        results[0].title.includes("Error"),
+      `Proximity should favor chunk with meaningful terms close together, got: ${results[0].title}`,
+    );
+    store.close();
   });
 });

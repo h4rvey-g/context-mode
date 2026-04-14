@@ -1,4 +1,7 @@
-import { describe, it, expect, beforeAll, beforeEach } from "vitest";
+import { describe, it, expect, beforeAll, beforeEach, afterEach } from "vitest";
+import { writeFileSync, unlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { resolve } from "node:path";
 
 // Dynamic import for .mjs module
 let routePreToolUse: (
@@ -14,6 +17,7 @@ let routePreToolUse: (
 
 let resetGuidanceThrottle: () => void;
 let ROUTING_BLOCK: string;
+let createRoutingBlock: (t: any, options?: { includeCommands?: boolean }) => string;
 let READ_GUIDANCE: string;
 let GREP_GUIDANCE: string;
 
@@ -24,12 +28,22 @@ beforeAll(async () => {
 
   const constants = await import("../../hooks/routing-block.mjs");
   ROUTING_BLOCK = constants.ROUTING_BLOCK;
+  createRoutingBlock = constants.createRoutingBlock;
   READ_GUIDANCE = constants.READ_GUIDANCE;
   GREP_GUIDANCE = constants.GREP_GUIDANCE;
 });
 
+// MCP readiness sentinel — most tests expect MCP to be ready (deny behavior).
+// Tests for graceful degradation (#230) remove sentinel explicitly.
+const mcpSentinel = resolve(tmpdir(), `context-mode-mcp-ready-${process.ppid}`);
+
 beforeEach(() => {
   if (typeof resetGuidanceThrottle === "function") resetGuidanceThrottle();
+  writeFileSync(mcpSentinel, String(process.pid));
+});
+
+afterEach(() => {
+  try { unlinkSync(mcpSentinel); } catch {}
 });
 
 describe("routePreToolUse", () => {
@@ -283,49 +297,101 @@ describe("routePreToolUse", () => {
       expect(result!.reason).toContain("fetch_and_index");
       expect(result!.reason).toContain("ctx_search");
     });
+
+    it("allows WebFetch when MCP server not ready (#230)", () => {
+      // Remove sentinel to simulate MCP not started
+      try { unlinkSync(mcpSentinel); } catch {}
+      const result = routePreToolUse("WebFetch", { url: "https://example.com" });
+      expect(result).toBeNull();
+    });
+
+    it("allows mcp_web_fetch alias when MCP server not ready (#230)", () => {
+      try { unlinkSync(mcpSentinel); } catch {}
+      const result = routePreToolUse("mcp_web_fetch", { url: "https://example.com" });
+      expect(result).toBeNull();
+    });
   });
 
-  // ─── Task routing ──────────────────────────────────────
+  // ─── MCP readiness: all redirects degrade gracefully (#230) ───
 
-  describe("Task tool", () => {
-    it("injects ROUTING_BLOCK into prompt", () => {
+  describe("MCP readiness graceful degradation (#230)", () => {
+    it("allows curl when MCP server not ready", () => {
+      try { unlinkSync(mcpSentinel); } catch {}
+      const result = routePreToolUse("Bash", { command: "curl https://example.com" });
+      expect(result).toBeNull();
+    });
+
+    it("allows inline HTTP when MCP server not ready", () => {
+      try { unlinkSync(mcpSentinel); } catch {}
+      const result = routePreToolUse("Bash", { command: "node -e \"fetch('https://example.com')\"" });
+      expect(result).toBeNull();
+    });
+
+    it("allows build tools when MCP server not ready", () => {
+      try { unlinkSync(mcpSentinel); } catch {}
+      const result = routePreToolUse("Bash", { command: "./gradlew build" });
+      expect(result).toBeNull();
+    });
+  });
+
+  // ─── Subagent ctx_commands omission (#233) ──────────────
+
+  describe("Subagent ctx_commands omission (#233)", () => {
+    it("Agent subagent prompt omits ctx_commands", () => {
+      const result = routePreToolUse("Agent", {
+        prompt: "Search the codebase",
+        subagent_type: "general-purpose",
+      });
+      expect(result).not.toBeNull();
+      expect(result!.action).toBe("modify");
+      const prompt = (result!.updatedInput as Record<string, string>).prompt;
+      expect(prompt).not.toContain("<ctx_commands>");
+      expect(prompt).toContain("<tool_selection_hierarchy>");
+    });
+
+    it("ROUTING_BLOCK constant includes ctx_commands for main session", () => {
+      expect(ROUTING_BLOCK).toContain("<ctx_commands>");
+      expect(ROUTING_BLOCK).toContain("ctx stats");
+    });
+
+    it("createRoutingBlock with includeCommands: false omits section", () => {
+      const t = (name: string) => `mcp__test__${name}`;
+      const block = createRoutingBlock(t, { includeCommands: false });
+      expect(block).not.toContain("<ctx_commands>");
+      expect(block).toContain("<tool_selection_hierarchy>");
+    });
+
+    it("createRoutingBlock default includes ctx_commands", () => {
+      const t = (name: string) => `mcp__test__${name}`;
+      const block = createRoutingBlock(t);
+      expect(block).toContain("<ctx_commands>");
+    });
+  });
+
+  // ─── Task routing (#241: removed — substring matching catches TaskCreate etc.) ──
+
+  describe("Task tool (#241)", () => {
+    it("returns null (passthrough) — no longer intercepted", () => {
       const result = routePreToolUse("Task", {
         prompt: "Analyze the codebase",
         subagent_type: "general-purpose",
       });
-      expect(result).not.toBeNull();
-      expect(result!.action).toBe("modify");
-      expect(result!.updatedInput).toBeDefined();
-      expect((result!.updatedInput as Record<string, string>).prompt).toContain(
-        "Analyze the codebase",
-      );
-      expect((result!.updatedInput as Record<string, string>).prompt).toContain(
-        "context_window_protection",
-      );
+      expect(result).toBeNull();
     });
 
-    it("upgrades Bash subagent to general-purpose", () => {
-      const result = routePreToolUse("Task", {
-        prompt: "Run some commands",
-        subagent_type: "Bash",
+    it("TaskCreate returns null (passthrough)", () => {
+      const result = routePreToolUse("TaskCreate", {
+        title: "my task",
       });
-      expect(result).not.toBeNull();
-      expect(result!.action).toBe("modify");
-      expect(
-        (result!.updatedInput as Record<string, string>).subagent_type,
-      ).toBe("general-purpose");
+      expect(result).toBeNull();
     });
 
-    it("keeps non-Bash subagent type unchanged", () => {
-      const result = routePreToolUse("Task", {
-        prompt: "Do research",
-        subagent_type: "general-purpose",
+    it("TaskUpdate returns null (passthrough)", () => {
+      const result = routePreToolUse("TaskUpdate", {
+        id: "123",
+        status: "done",
       });
-      expect(result).not.toBeNull();
-      expect(result!.action).toBe("modify");
-      expect(
-        (result!.updatedInput as Record<string, string>).subagent_type,
-      ).toBe("general-purpose");
+      expect(result).toBeNull();
     });
   });
 

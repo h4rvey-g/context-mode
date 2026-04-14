@@ -21,13 +21,14 @@ import {
   readStdin, getSessionId, getSessionDBPath, getSessionEventsPath, getCleanupFlagPath,
   getProjectDir, GEMINI_OPTS,
 } from "../session-helpers.mjs";
+import { createSessionLoaders } from "../session-loaders.mjs";
 import { join, dirname } from "node:path";
 import { readFileSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const HOOK_DIR = dirname(fileURLToPath(import.meta.url));
-const PKG_SESSION = join(HOOK_DIR, "..", "..", "build", "session");
+const { loadSessionDB } = createSessionLoaders(HOOK_DIR);
 const OPTS = GEMINI_OPTS;
 
 let additionalContext = ROUTING_BLOCK;
@@ -38,7 +39,7 @@ try {
   const source = input.source ?? "startup";
 
   if (source === "compact") {
-    const { SessionDB } = await import(pathToFileURL(join(PKG_SESSION, "db.js")).href);
+    const { SessionDB } = await loadSessionDB();
     const dbPath = getSessionDBPath(OPTS);
     const db = new SessionDB({ dbPath });
     const sessionId = getSessionId(input, OPTS);
@@ -58,7 +59,7 @@ try {
   } else if (source === "resume") {
     try { unlinkSync(getCleanupFlagPath(OPTS)); } catch { /* no flag */ }
 
-    const { SessionDB } = await import(pathToFileURL(join(PKG_SESSION, "db.js")).href);
+    const { SessionDB } = await loadSessionDB();
     const dbPath = getSessionDBPath(OPTS);
     const db = new SessionDB({ dbPath });
 
@@ -70,7 +71,7 @@ try {
 
     db.close();
   } else if (source === "startup") {
-    const { SessionDB } = await import(pathToFileURL(join(PKG_SESSION, "db.js")).href);
+    const { SessionDB } = await loadSessionDB();
     const dbPath = getSessionDBPath(OPTS);
     const db = new SessionDB({ dbPath });
     try { unlinkSync(getSessionEventsPath(OPTS)); } catch { /* no stale file */ }

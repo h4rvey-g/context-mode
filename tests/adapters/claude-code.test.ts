@@ -6,6 +6,11 @@ import { join, resolve } from "node:path";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { ClaudeCodeAdapter } from "../../src/adapters/claude-code/index.js";
 import { fakeHome, realHome } from "../setup-home";
+import {
+  PRE_TOOL_USE_MATCHERS,
+  POST_TOOL_USE_MATCHERS,
+  POST_TOOL_USE_MATCHER_PATTERN,
+} from "../../src/adapters/claude-code/hooks.js";
 
 describe("ClaudeCodeAdapter", () => {
   let adapter: ClaudeCodeAdapter;
@@ -554,6 +559,46 @@ describe("ClaudeCodeAdapter", () => {
       const command = sessionHooks[0].hooks[0].command;
       expect(command).toContain(pluginRoot);
       expect(command).toContain("sessionstart.mjs");
+    });
+  });
+
+  // ── Hook matchers (#229, #241) ────────────────────────
+
+  describe("hook matchers (#229, #241)", () => {
+    it("PRE_TOOL_USE_MATCHERS does NOT contain 'Task' (#241)", () => {
+      expect(PRE_TOOL_USE_MATCHERS).not.toContain("Task");
+    });
+
+    it("PRE_TOOL_USE_MATCHERS contains 'Agent' for subagent routing", () => {
+      expect(PRE_TOOL_USE_MATCHERS).toContain("Agent");
+    });
+
+    it("POST_TOOL_USE_MATCHERS contains all tools that extractEvents handles", () => {
+      const required = [
+        "Bash", "Read", "Write", "Edit", "NotebookEdit", "Glob", "Grep",
+        "TodoWrite", "TaskCreate", "TaskUpdate",
+        "EnterPlanMode", "ExitPlanMode",
+        "Skill", "Agent", "AskUserQuestion", "EnterWorktree",
+        "mcp__",
+      ];
+      for (const tool of required) {
+        expect(POST_TOOL_USE_MATCHERS).toContain(tool);
+      }
+    });
+
+    it("POST_TOOL_USE_MATCHERS does NOT contain tools that produce zero events (#229)", () => {
+      const excluded = [
+        "TaskGet", "TaskList", "TaskStop", "TaskOutput",
+        "ExitWorktree", "WebFetch", "WebSearch",
+        "RemoteTrigger", "CronCreate", "CronDelete", "CronList",
+      ];
+      for (const tool of excluded) {
+        expect(POST_TOOL_USE_MATCHERS).not.toContain(tool);
+      }
+    });
+
+    it("POST_TOOL_USE_MATCHER_PATTERN is pipe-separated string", () => {
+      expect(POST_TOOL_USE_MATCHER_PATTERN).toBe(POST_TOOL_USE_MATCHERS.join("|"));
     });
   });
 

@@ -1,4 +1,7 @@
-import { describe, it, expect, beforeAll, beforeEach } from "vitest";
+import { describe, it, expect, beforeAll, beforeEach, afterEach } from "vitest";
+import { writeFileSync, unlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { resolve } from "node:path";
 
 let getToolName: (platform: string, bareTool: string) => string;
 let createToolNamer: (platform: string) => (bareTool: string) => string;
@@ -45,8 +48,16 @@ beforeAll(async () => {
   BASH_GUIDANCE = block.BASH_GUIDANCE;
 });
 
+// MCP readiness sentinel — routing.mjs checks process.ppid in-process
+const mcpSentinel = resolve(tmpdir(), `context-mode-mcp-ready-${process.ppid}`);
+
 beforeEach(() => {
   if (typeof resetGuidanceThrottle === "function") resetGuidanceThrottle();
+  writeFileSync(mcpSentinel, String(process.pid));
+});
+
+afterEach(() => {
+  try { unlinkSync(mcpSentinel); } catch {}
 });
 
 // ═══════════════════════════════════════════════════════════════════
@@ -271,15 +282,11 @@ describe("routePreToolUse with platform parameter", () => {
     expect(result!.reason).toContain("@context-mode/ctx_search");
   });
 
-  it("Task routing block uses opencode tool names when platform=opencode", () => {
+  it("Task is no longer routed — returns null (#241)", () => {
     const result = routePreToolUse("Task", {
       prompt: "Analyze the code",
     }, "/tmp", "opencode");
-    expect(result).not.toBeNull();
-    const prompt = (result!.updatedInput as Record<string, string>).prompt;
-    expect(prompt).toContain("context-mode_ctx_batch_execute");
-    expect(prompt).toContain("context-mode_ctx_search");
-    expect(prompt).not.toContain("mcp__plugin_context-mode_context-mode__");
+    expect(result).toBeNull();
   });
 
   it("Read guidance uses vscode-copilot tool names when platform=vscode-copilot", () => {

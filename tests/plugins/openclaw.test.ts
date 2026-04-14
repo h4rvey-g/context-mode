@@ -9,14 +9,19 @@ import "../setup-home";
  */
 
 import { strict as assert } from "node:assert";
-import { mkdtempSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { mkdtempSync, rmSync, writeFileSync, unlinkSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
-import { describe, it, expect, test, beforeAll, beforeEach, afterAll, vi } from "vitest";
+import { describe, it, expect, test, beforeAll, beforeEach, afterAll, afterEach, vi } from "vitest";
 import { SessionDB } from "../../src/session/db.js";
 import { OpenClawSessionDB } from "../../src/adapters/openclaw/session-db.js";
 import { extractWorkspace, WorkspaceRouter } from "../../src/openclaw/workspace-router.js";
+
+// MCP readiness sentinel — routing.mjs checks process.ppid in-process
+const mcpSentinel = resolve(tmpdir(), `context-mode-mcp-ready-${process.ppid}`);
+beforeEach(() => { writeFileSync(mcpSentinel, String(process.pid)); });
+afterEach(() => { try { unlinkSync(mcpSentinel); } catch {} });
 
 // ═══════════════════════════════════════════════════════════
 // Mock helpers (from openclaw-plugin.test.ts)

@@ -120,8 +120,17 @@ code{font-family:var(--mono);font-size:.88em;background:var(--bg-code);color:var
 /* ── Section spacing ── */
 .chapter{padding:72px 0 0}
 
+/* ── Availability ── */
+.avail{position:relative;display:inline-flex;align-items:center;gap:5px;cursor:default}
+.avail .dot{width:6px;height:6px;border-radius:50%;background:var(--green);display:inline-block;flex-shrink:0}
+.avail .dot::after{content:'';position:absolute;width:6px;height:6px;border-radius:50%;background:var(--green);animation:ping 1.5s cubic-bezier(0,0,.2,1) infinite}
+@keyframes ping{75%,100%{transform:scale(2);opacity:0}}
+.avail-tip{position:absolute;bottom:calc(100% + 8px);left:50%;transform:translateX(-50%);background:var(--text);color:var(--bg);font-size:12px;line-height:1.5;padding:10px 14px;border-radius:6px;white-space:nowrap;opacity:0;pointer-events:none;transition:opacity .15s}
+.avail-tip::after{content:'';position:absolute;top:100%;left:50%;transform:translateX(-50%);border:5px solid transparent;border-top-color:var(--text)}
+.avail:hover .avail-tip{opacity:1}
+
 /* ── Responsive ── */
-@media(max-width:600px){.hero-stats{gap:1.5rem}.bench{flex-direction:column}.cont{grid-template-columns:1fr 1fr}.layer{flex-wrap:wrap}}
+@media(max-width:600px){.hero-stats{gap:1.5rem}.bench{flex-direction:column}.cont{grid-template-columns:1fr 1fr}.layer{flex-wrap:wrap}.avail-tip{white-space:normal;width:220px}}
 </style>
 </head>
 <body>
@@ -130,7 +139,7 @@ code{font-family:var(--mono);font-size:.88em;background:var(--bg-code);color:var
 
 <!-- Hero -->
 <section class="hero rev">
-  <p style="font-size:13px;color:var(--text-4);margin-bottom:1rem">by <a href="https://mksg.lu" style="color:var(--text-3)">B. Mert Köseoğlu</a></p>
+  <p style="font-size:13px;color:var(--text-4);margin-bottom:1rem">by <a href="https://mksg.lu" style="color:var(--text-3)">B. Mert Köseoğlu</a> · <span class="avail"><span class="dot"></span><span style="color:var(--green);font-size:12px">open to new opportunities</span><span class="avail-tip"><strong>Founding Engineer · AI · Tech Lead</strong><br>Fully remote preferred.<br>UK &amp; NL: sponsorship + competitive comp.</span></span></p>
   <h1 class="hero-title">context-mode</h1>
   <p class="hero-sub">The other half of the context problem.</p>
   <div class="hero-stats">
@@ -421,7 +430,7 @@ code{font-family:var(--mono);font-size:.88em;background:var(--bg-code);color:var
 <footer style="padding:60px 0;text-align:center;border-top:1px solid var(--border-light)">
   <p style="font-family:var(--serif);font-size:clamp(1.2rem,3vw,1.6rem);font-style:italic;color:var(--text);margin-bottom:1.2rem;padding:0 24px">Stop feeding your context window raw bytes.<br>Feed it answers.</p>
   <p style="font-size:14px;color:var(--text-3)"><a href="https://github.com/mksglu/context-mode">github.com/mksglu/context-mode</a></p>
-  <p style="margin-top:1rem;font-size:13px;color:var(--text-4)">Built by <a href="https://mksg.lu" style="color:var(--text-3)">B. Mert Köseoğlu</a></p>
+  <p style="margin-top:1rem;font-size:13px;color:var(--text-4)">Built by <a href="https://mksg.lu" style="color:var(--text-3)">B. Mert Köseoğlu</a> · <span class="avail"><span class="dot"></span><span style="color:var(--green);font-size:12px">open to new opportunities</span><span class="avail-tip"><strong>Founding Engineer · AI · Tech Lead</strong><br>Fully remote preferred.<br>UK &amp; NL: sponsorship + competitive comp.</span></span></p>
   <p style="margin-top:.6rem"><a href="https://github.com/mksglu/context-mode/issues/134" style="color:var(--text-4);font-size:12px">Liked this? Help a solo dev out →</a></p>
   <p style="margin-top:2rem;font-size:11px;color:var(--text-4);line-height:1.6">MKSF LTD · Suite 8805 5 Brayford Square · London, E1 0SG · United Kingdom</p>
 </footer>
